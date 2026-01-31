@@ -1,0 +1,302 @@
+import sys
+from pathlib import Path
+
+import pandas as pd
+import plotly.graph_objects as go
+
+# ---- bootstrap: ensure project root in sys.path ----
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import streamlit as st
+from datetime import date, datetime, timedelta
+
+from services.watchlist_service import watchlist_list
+from services.estimation_service import estimate_one
+from services.intraday_service import intraday_load_fund_series
+from services.history_service import fund_history
+from storage.json_store import load_json
+from storage import paths
+from services.accuracy_service import fund_gap_summary, guess_gap_reasons, fund_gap_table
+
+
+st.set_page_config(page_title="Fund Detail", layout="wide")
+
+
+def _pick_code_from_query_or_select() -> str:
+    # Streamlit 新旧版本兼容 query params
+    code = ""
+    try:
+        qp = st.query_params  # 新版
+        code = qp.get("code", "")
+        if isinstance(code, list):
+            code = code[0] if code else ""
+    except Exception:
+        try:
+            qp = st.experimental_get_query_params()  # 旧版
+            code = qp.get("code", [""])[0]
+        except Exception:
+            code = ""
+
+    code = (code or "").strip()
+    wl = watchlist_list()
+    options = wl if wl else ["510300"]
+
+    if code and code not in options:
+        options = [code] + options
+
+    return st.selectbox("基金代码", options=options, index=0 if not code else options.index(code))
+
+
+def _read_ledger_status(code: str, date_str: str) -> dict:
+    data = load_json(paths.file_daily_ledger(), fallback={"items": []})
+    items = data.get("items", [])
+    for it in items:
+        if str(it.get("code")) == code and str(it.get("date")) == date_str:
+            return it
+    return {}
+
+
+def render():
+    st.title("基金详情")
+
+    code = _pick_code_from_query_or_select()
+
+    # --- top: realtime quote ---
+    est = estimate_one(code)
+    c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 2])
+    with c1:
+        st.metric("名称", est.name if est else f"基金{code}")
+    with c2:
+        st.metric("预估净值", f"{est.est_nav:.6f}" if est else "-")
+    with c3:
+        st.metric("预估涨跌幅", f"{est.est_change_pct:.2f}%" if est else "-")
+    with c4:
+        st.metric("置信度", f"{est.confidence:.2f}" if est else "-")
+    with c5:
+        st.caption(f"估值时间：{est.est_time if est else '-'} | 方法：{est.method if est else '-'}")
+
+    if est and est.warning:
+        st.warning(est.warning)
+
+    st.divider()
+
+    # --- intraday curve ---
+    st.subheader("盘中估值曲线（intraday）")
+    intraday = intraday_load_fund_series(code, limit=400)
+
+    if not intraday:
+        st.info("暂无盘中序列")
+    else:
+        df = pd.DataFrame(intraday)
+
+        # 兜底字段
+        if "t" not in df:
+            df["t"] = ""
+        if "est_nav" not in df:
+            df["est_nav"] = None
+        if "marker" not in df:
+            df["marker"] = None
+
+        fig = go.Figure()
+
+        # 1️⃣ 盘中估算折线
+        fig.add_trace(
+            go.Scatter(
+                x=df["t"],
+                y=df["est_nav"],
+                mode="lines+markers",
+                name="盘中估算净值",
+                line=dict(width=2),
+                marker=dict(size=5),
+                hovertemplate=(
+                    "时间: %{x}<br>"
+                    "估算净值: %{y}<br>"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+        # 2️⃣ 收盘标记点（marker=CLOSE）
+        close_df = df[df["marker"] == "CLOSE"]
+        if not close_df.empty:
+            for _, row in close_df.iterrows():
+                fig.add_vline(
+                    x=row["t"],
+                    line=dict(color="red", width=2, dash="dash"),
+                    annotation_text="收盘",
+                    annotation_position="top",
+                )
+
+        fig.update_layout(
+            height=360,
+            margin=dict(l=40, r=20, t=30, b=40),
+            xaxis_title="时间",
+            yaxis_title="净值",
+            hovermode="x unified",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # 最近一条点的摘要
+        last = intraday[-1]
+        st.caption(
+            f"最近：t={last.get('t')} | "
+            f"est_nav={last.get('est_nav')} | "
+            f"method={last.get('method')} | "
+            f"conf={last.get('confidence')} | "
+            f"marker={last.get('marker')}"
+        )
+
+        # 最近一条
+        last = intraday[-1]
+        st.caption(f"最近：t={last.get('t')} est_nav={last.get('est_nav')} pct={last.get('est_change_pct')} method={last.get('method')} conf={last.get('confidence')}")
+
+    st.divider()
+
+    st.subheader("估算缩水解释（估算收盘 vs 官方净值）")
+
+    summary = fund_gap_summary(code, days_back=120)
+    threshold = st.slider("异常阈值（绝对误差%）", min_value=0.10, max_value=2.00, value=0.30, step=0.05)
+
+    if summary["count"] == 0:
+        st.info("暂无已结算（settled）的历史对比数据。等至少有 1 天官方净值后，这里会自动出现误差分析。")
+    else:
+        latest = summary["latest"]
+
+        abs_gap = float(latest["abs_gap_pct"])
+        if abs_gap > threshold:
+            st.warning(f"⚠️ 该基金最近已结算日误差 {abs_gap:.4f}% > 阈值 {threshold:.2f}%：盘中收益/涨跌幅可能偏“虚胖”，建议谨慎参考尾盘预估。")
+        else:
+            st.success(f"✅ 最近误差 {abs_gap:.4f}% ≤ 阈值 {threshold:.2f}%：估算口径较稳定。")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("样本天数", f'{summary["count"]}')
+        c2.metric("平均绝对误差", f'{summary["mae_pct"]:.4f}%')
+        c3.metric("最大绝对误差", f'{summary["max_abs_gap_pct"]:.4f}%')
+        c4.metric("命中率(≤0.30%)", f'{summary["hit_rate_pct"]:.1f}%')
+
+        st.markdown(
+            f"""
+    **最新已结算日：{latest["date"]}**  
+    - 估算收盘净值：`{latest["estimated_nav_close"]:.6f}`  
+    - 官方净值：`{latest["official_nav"]:.6f}`  
+    - 误差：`{latest["gap_nav"]:+.6f}`（`{latest["gap_pct"]:+.4f}%`）
+    """
+        )
+
+        reasons = guess_gap_reasons(code, float(latest["abs_gap_pct"]))
+        with st.expander("为什么会缩水/放大？（规则解释）", expanded=True):
+            for r in reasons:
+                st.write("- " + r)
+
+
+    st.subheader("误差历史（已结算日）")
+
+    gap_rows = fund_gap_table(code, days_back=120)
+    if not gap_rows:
+        st.info("暂无误差历史（需要 settled 数据）。")
+    else:
+        df_gap = pd.DataFrame(gap_rows)
+
+        # 表格：最近 N 天
+        total_n = len(df_gap)
+
+        # slider 边界保护
+        if total_n <= 1:
+            show_n = total_n
+        else:
+            min_n = 2
+            max_n = min(60, total_n)
+            default_n = min(20, max_n)
+
+            show_n = st.slider(
+                "展示最近 N 个已结算日",
+                min_value=min_n,
+                max_value=max_n,
+                value=default_n,
+                step=1,
+            )
+
+        df_show = df_gap.tail(show_n).copy()
+
+        # 误差曲线：abs_gap_pct
+        fig_gap = go.Figure()
+        fig_gap.add_trace(
+            go.Scatter(
+                x=df_show["date"],
+                y=df_show["abs_gap_pct"],
+                mode="lines+markers",
+                name="绝对误差(%)",
+                hovertemplate="日期: %{x}<br>绝对误差: %{y:.4f}%<extra></extra>",
+            )
+        )
+        # 加一条阈值参考线：0.30%
+        fig_gap.add_hline(
+            y=0.30,
+            line=dict(color="gray", dash="dot"),
+            annotation_text="0.30% 阈值",
+            annotation_position="top left",
+        )
+        fig_gap.update_layout(
+            height=300,
+            margin=dict(l=40, r=20, t=30, b=40),
+            xaxis_title="日期",
+            yaxis_title="绝对误差(%)",
+        )
+        st.plotly_chart(fig_gap, use_container_width=True)
+
+        # 表格展示
+        st.dataframe(
+            df_show[["date", "estimated_nav_close", "official_nav", "gap_nav", "gap_pct", "abs_gap_pct"]],
+            width="stretch",
+            hide_index=True,
+        )
+        st.caption("说明：这里统计的是“估算收盘净值 vs 官方净值”的误差，仅包含 settle_status=settled 的日期。")
+
+
+    # --- history nav ---
+    st.subheader("历史净值（official/estimated）")
+    days = st.slider("展示最近 N 天", min_value=10, max_value=240, value=60, step=10)
+    hist = fund_history(code, days_back=days)
+    if not hist:
+        st.info("暂无历史净值：需要历史源或日结数据累计。")
+    else:
+        st.dataframe(hist, width="stretch", hide_index=True)
+
+    st.divider()
+
+    # --- coverage status explanation ---
+    st.subheader("当天收益覆盖状态（estimated_only vs settled）")
+    d = st.date_input("选择日期查看覆盖状态", value=date.today())
+    ds = d.isoformat()
+    row = _read_ledger_status(code, ds)
+
+    if not row:
+        st.info("该日期在 daily_ledger 中没有记录。你可以去 Ledger 页生成 estimated close，再尝试结算。")
+    else:
+        status = row.get("settle_status")
+        st.write(f"**{ds} 状态：** `{status}`")
+        st.json(
+            {
+                "estimated_nav_close": row.get("estimated_nav_close"),
+                "official_nav": row.get("official_nav"),
+                "estimated_pnl_close": row.get("estimated_pnl_close"),
+                "official_pnl": row.get("official_pnl"),
+            }
+        )
+
+        if status == "estimated_only":
+            st.warning(
+                "说明：该日收益仍是【估算】。夜间官方净值发布后，可能出现“缩水/扩大”的差异。\n\n"
+                "常见原因：\n"
+                "- 盘中估值依赖持仓股票实时涨跌（估算）\n"
+                "- 收盘后基金会计按收盘价计算并发布官方净值（真实）\n"
+                "- 部分基金/ETF 还有折溢价、汇率/期货、T+1 数据延迟等影响"
+            )
+        elif status == "settled":
+            st.success("说明：该日收益已被官方净值覆盖（settled），可作为真实历史收益统计口径。")
+
+
+render()
