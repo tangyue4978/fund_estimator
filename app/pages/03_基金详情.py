@@ -10,19 +10,37 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import streamlit as st
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:  # pragma: no cover
+    st_autorefresh = None
 from datetime import date, datetime, timedelta
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
 
 from services.watchlist_service import watchlist_list
 from services.estimation_service import estimate_one
-from services.intraday_service import intraday_load_fund_series
+from services.intraday_service import intraday_load_fund_series, record_intraday_point
 from services.history_service import fund_history
 from storage.json_store import load_json
 from storage import paths
 from services.accuracy_service import fund_gap_summary, guess_gap_reasons, fund_gap_table
+from services.fund_service import get_fund_profile
 
 
 st.set_page_config(page_title="Fund Detail", layout="wide")
 
+# auto refresh
+AUTO_REFRESH_SEC = 10
+_refresh_sec = st.sidebar.number_input("Auto refresh (sec)", min_value=5, max_value=120, value=AUTO_REFRESH_SEC, step=5)
+_auto_on = st.sidebar.checkbox("Enable auto refresh", value=True)
+if _auto_on:
+    if st_autorefresh is not None:
+        st_autorefresh(interval=int(_refresh_sec) * 1000, key="fund_detail_autorefresh")
+    elif hasattr(st, "autorefresh"):
+        st.autorefresh(interval=int(_refresh_sec) * 1000, key="fund_detail_autorefresh")
 
 def _pick_code_from_query_or_select() -> str:
     # Streamlit 新旧版本兼容 query params
@@ -46,8 +64,59 @@ def _pick_code_from_query_or_select() -> str:
     if code and code not in options:
         options = [code] + options
 
-    return st.selectbox("基金代码", options=options, index=0 if not code else options.index(code))
+    def _fmt_option(c: str) -> str:
+        try:
+            p = get_fund_profile(c)
+            n = (p.name or "").strip()
+        except Exception:
+            n = ""
+        if not n:
+            n = f"\u57fa\u91d1{c}"
+        return f"{c} - {n}"
 
+    return st.selectbox("基金代码", options=options, index=0 if not code else options.index(code), format_func=_fmt_option)
+
+
+
+
+def _downsample(points: list, max_points: int) -> list:
+    if not isinstance(points, list) or max_points <= 0:
+        return []
+    n = len(points)
+    if n <= max_points:
+        return points
+    step = max(1, n // max_points)
+    sampled = points[::step]
+    return sampled[-max_points:]
+
+
+def _is_trading_time_hhmmss(t: str) -> bool:
+    try:
+        hh, mm, ss = t.split(":")
+        h = int(hh)
+        m = int(mm)
+        s = int(ss)
+    except Exception:
+        return False
+    total = h * 3600 + m * 60 + s
+    am_start = 9 * 3600 + 30 * 60
+    am_end = 11 * 3600 + 30 * 60
+    pm_start = 13 * 3600
+    pm_end = 15 * 3600
+    return (am_start <= total <= am_end) or (pm_start <= total <= pm_end)
+
+
+def _filter_trading_session(points: list) -> list:
+    if not isinstance(points, list):
+        return []
+    out = []
+    for it in points:
+        t = str(it.get("t", "")).strip()
+        if not t:
+            continue
+        if _is_trading_time_hhmmss(t):
+            out.append(it)
+    return out
 
 def _read_ledger_status(code: str, date_str: str) -> dict:
     data = load_json(paths.file_daily_ledger(), fallback={"items": []})
@@ -80,11 +149,26 @@ def render():
     if est and est.warning:
         st.warning(est.warning)
 
+    # --- lightweight sampling on detail page ---
+    if est:
+        if "detail_last_sample_ts" not in st.session_state:
+            st.session_state["detail_last_sample_ts"] = {}
+        last_map = st.session_state["detail_last_sample_ts"]
+        now_dt = datetime.now(ZoneInfo("Asia/Shanghai")) if ZoneInfo else datetime.now()
+        last_ts = float(last_map.get(code, 0.0) or 0.0)
+        if (now_dt.timestamp() - last_ts) >= 20:
+            record_intraday_point(target=code, estimate=est, date_str=now_dt.date().isoformat())
+            last_map[code] = now_dt.timestamp()
+            st.session_state["detail_last_sample_ts"] = last_map
+
     st.divider()
 
     # --- intraday curve ---
     st.subheader("盘中估值曲线（intraday）")
-    intraday = intraday_load_fund_series(code, limit=400)
+    max_points = 200
+    intraday = intraday_load_fund_series(code, limit=800)
+    intraday = _filter_trading_session(intraday)
+    intraday = _downsample(intraday, max_points)
 
     if not intraday:
         st.info("暂无盘中序列")

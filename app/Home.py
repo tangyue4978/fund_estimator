@@ -13,15 +13,41 @@ paths.ensure_dirs()
 import time
 import threading
 from datetime import datetime, time as dtime
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - fallback for environments without zoneinfo
+    ZoneInfo = None
 
 import streamlit as st
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:  # pragma: no cover
+    st_autorefresh = None
 
 from services.watchlist_service import watchlist_list, watchlist_add, watchlist_remove
 from services.estimation_service import estimate_many
 from services.intraday_service import record_intraday_point, intraday_append_close_marker
+from storage.json_store import update_json, load_json
 
 
 st.set_page_config(page_title="Fund Estimator", layout="wide")
+
+# auto refresh (Home)
+HOME_AUTO_REFRESH_SEC = 10
+_home_refresh_sec = st.sidebar.number_input("Home auto refresh (sec)", min_value=5, max_value=120, value=HOME_AUTO_REFRESH_SEC, step=5)
+_home_auto_on = st.sidebar.checkbox("Enable home auto refresh", value=True)
+if _home_auto_on:
+    if st_autorefresh is not None:
+        st_autorefresh(interval=int(_home_refresh_sec) * 1000, key="home_autorefresh")
+    elif hasattr(st, "autorefresh"):
+        st.autorefresh(interval=int(_home_refresh_sec) * 1000, key="home_autorefresh")
+
+
+
+def _now_cn() -> datetime:
+    if ZoneInfo is None:
+        return datetime.now()
+    return datetime.now(ZoneInfo("Asia/Shanghai"))
 
 
 def _is_cn_trading_time(now: datetime) -> bool:
@@ -47,6 +73,21 @@ def _is_close_window(now: datetime) -> bool:
     return dtime(15, 0) <= t <= dtime(15, 1, 30)
 
 
+def _status_path() -> str:
+    return str(paths.data_dir() / "intraday_status.json")
+
+
+def _write_collector_status(payload: dict) -> None:
+    p = _status_path()
+    def updater(data: dict):
+        data.update(payload)
+        return data
+    update_json(p, updater)
+
+
+def _read_collector_status() -> dict:
+    return load_json(_status_path(), fallback={}) or {}
+
 def _collector_loop(interval_sec: int, only_trading: bool = True):
     """
     后台采样：
@@ -54,11 +95,10 @@ def _collector_loop(interval_sec: int, only_trading: bool = True):
       - 15:00 附近自动写 CLOSE 标记点（每基金每天仅一次）
     注意：不要在这个线程里调用 st.xxx
     """
-    from datetime import date as _date
-
     while st.session_state.get("_collector_running", False):
-        now = datetime.now()
-        ds = _date.today().isoformat()
+        now = _now_cn()
+        ds = now.date().isoformat()
+        wrote_points = 0
 
         try:
             codes = watchlist_list()
@@ -86,6 +126,7 @@ def _collector_loop(interval_sec: int, only_trading: bool = True):
                         estimate=est,
                         date_str=ds,
                     )
+                    wrote_points += 1
 
         except Exception:
             # 避免线程异常导致整个采样停掉
@@ -149,6 +190,20 @@ def render_watchlist():
 
     est_map = estimate_many(codes)
 
+    # lightweight sampling on Home rerun (persists to intraday)
+    if "home_last_sample_ts" not in st.session_state:
+        st.session_state["home_last_sample_ts"] = {}
+    _last_map = st.session_state["home_last_sample_ts"]
+    _now = _now_cn()
+    _ds = _now.date().isoformat()
+    _last_ts = float(_last_map.get("_all", 0.0) or 0.0)
+    if (_now.timestamp() - _last_ts) >= max(5, int(_home_refresh_sec)):
+        for _c, _est in est_map.items():
+            if _est:
+                record_intraday_point(target=_c, estimate=_est, date_str=_ds)
+        _last_map["_all"] = _now.timestamp()
+        st.session_state["home_last_sample_ts"] = _last_map
+
     rows = []
     for c in codes:
         est = est_map.get(c)
@@ -182,22 +237,25 @@ def render_watchlist():
     st.caption(f"更新时间：{datetime.now().isoformat(timespec='seconds')}（本页刷新不会写入日结，仅展示）")
     st.dataframe(rows, width="stretch", hide_index=True)
 
+    name_map = {c: ((est_map.get(c).name if est_map.get(c) else '') or f'\u57fa\u91d1{c}') for c in codes}
+
+    def _fmt_code(c: str) -> str:
+        return f"{c} - {name_map.get(c, '')}"
+
     st.divider()
     st.subheader("查看基金详情")
-
-    sel = st.selectbox("选择一个基金打开详情页", options=codes)
+    sel = st.selectbox("\u9009\u62e9\u4e00\u4e2a\u57fa\u91d1\u6253\u5f00\u8be6\u60c5\u9875", options=codes, format_func=_fmt_code)
     if st.button("打开详情页", width="stretch"):
         try:
             st.query_params["code"] = sel  # 新版
         except Exception:
             st.experimental_set_query_params(code=sel)  # 旧版
         # ✅ 注意：switch_page 的路径必须相对 app/ 目录
-        st.switch_page("pages/03_Fund_Detail.py")
+        st.switch_page("pages/03_基金详情.py")
 
     st.divider()
     st.subheader("管理自选")
-
-    rm_code = st.selectbox("选择要移除的代码", options=codes, key="rm_code")
+    rm_code = st.selectbox("\u9009\u62e9\u8981\u79fb\u9664\u7684\u4ee3\u7801", options=codes, key="rm_code", format_func=_fmt_code)
     if st.button("移除所选", type="secondary", width="stretch"):
         watchlist_remove(rm_code)
         st.toast("已移除", icon="🗑️")

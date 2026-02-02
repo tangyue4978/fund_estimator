@@ -7,6 +7,7 @@ from typing import Final
 METHOD_OFFICIAL_GSZ: Final[str] = "OFFICIAL_GSZ"
 METHOD_ETF_IIV: Final[str] = "ETF_IIV"
 METHOD_INDEX_PROXY: Final[str] = "INDEX_PROXY"
+METHOD_HOLDING_WEIGHTED: Final[str] = "HOLDING_WEIGHTED"
 METHOD_FROZEN_NAV: Final[str] = "FROZEN_NAV"
 METHOD_MOCK: Final[str] = "MOCK"
 

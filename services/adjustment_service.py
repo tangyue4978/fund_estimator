@@ -116,3 +116,31 @@ def clear_adjustments() -> None:
         return data
 
     update_json(p, updater)
+
+
+def remove_adjustments_by_code(code: str) -> int:
+    code = (code or "").strip()
+    if not code:
+        raise ValueError("code is required")
+
+    p = paths.file_adjustments()
+    removed = {"count": 0}
+
+    def updater(data: dict):
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            items = []
+        new_items = []
+        cnt = 0
+        for it in items:
+            if str(it.get("code", "")).strip() == code:
+                cnt += 1
+            else:
+                new_items.append(it)
+        removed["count"] = cnt
+        data["items"] = new_items
+        data["updated_at"] = _now_iso()
+        return data
+
+    update_json(p, updater)
+    return removed["count"]

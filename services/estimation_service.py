@@ -1,110 +1,185 @@
+﻿# services/estimation_service.py
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Dict, List, Tuple
 
-from config import settings
 from config import constants
-from datasources.fund_api import fetch_gsz_quotes, GszQuote
+from datasources.fund_api import fetch_gsz_quotes
+from datasources.fund_holdings_jsonmap import load_holdings, load_holdings_batch
+from datasources.market_api import fetch_stock_quotes, normalize_stock_code
+from datasources.nav_api import fetch_official_navs
 from domain.estimate import EstimateResult
-from utils.time_utils import is_trading_time
+from services import fund_service
+from utils.time_utils import now_iso
 
 
-def _parse_iso(ts: str) -> datetime:
-    return datetime.fromisoformat(ts)
+def _latest_official_nav(code: str) -> Tuple[float, str | None]:
+    items = fetch_official_navs(code, days_back=10)
+    if not items:
+        return 0.0, None
+    last = items[-1]
+    return float(last.nav), last.nav_date
 
 
-def is_gsz_active(q: GszQuote) -> bool:
-    """
-    判断 gsz 是否可用且活跃：
-    - gsz > 0
-    - gztime 可解析
-    - 若在交易时段内：gztime 距离现在不超过阈值（默认 5 分钟）
-    """
-    if q is None:
-        return False
-    if q.gsz is None or q.gsz <= 0:
-        return False
+def _estimate_from_gsz(code: str, name: str, q, *, method: str) -> EstimateResult:
+    if q and q.gsz and q.gsz > 0:
+        return EstimateResult(
+            code=code,
+            name=name,
+            est_nav=q.gsz,
+            est_change_pct=q.gszzl,
+            method=method,
+            confidence=0.9,
+            warning="",
+            suggested_refresh_sec=10,
+            est_time=q.gztime,
+        )
 
-    try:
-        t = _parse_iso(q.gztime)
-    except Exception:
-        return False
+    frozen_nav = q.nav if q and q.nav and q.nav > 0 else 0.0
+    return EstimateResult(
+        code=code,
+        name=name,
+        est_nav=frozen_nav,
+        est_change_pct=0.0,
+        method=constants.METHOD_FROZEN_NAV,
+        confidence=0.3,
+        warning="estimate data unavailable, fallback to last nav",
+        suggested_refresh_sec=60,
+        est_time=q.gztime if q else now_iso(),
+    )
 
-    if is_trading_time(settings.TRADING_SESSIONS):
-        age = (datetime.now() - t).total_seconds()
-        return age <= settings.GSZ_STALE_SECONDS
 
-    # 非交易时段：允许使用最新一条（用于收盘后回看）
-    return True
+def _estimate_by_holdings(code: str, name: str, holdings_obj: dict, stock_quotes: dict, q) -> EstimateResult | None:
+    holdings = holdings_obj.get("holdings", []) if isinstance(holdings_obj, dict) else []
+    if not holdings:
+        return None
 
+    total_weight = 0.0
+    covered_weight = 0.0
+    weighted_sum = 0.0
 
-def route_estimation(q: GszQuote) -> Tuple[str, float, float, str, int]:
-    """
-    路由策略（本阶段只实现 OFFICIAL_GSZ 与 FROZEN_NAV）
-    返回：
-    - method
-    - est_nav
-    - confidence
-    - warning
-    - suggested_refresh_sec
-    """
-    if q and is_gsz_active(q):
-        # OFFICIAL_GSZ
-        method = constants.METHOD_OFFICIAL_GSZ
-        confidence = 0.85
-        warning = ""
-        suggested = settings.REFRESH_SEC_HIGH_CONF
-        return method, q.gsz, confidence, warning, suggested
+    for it in holdings:
+        if not isinstance(it, dict):
+            continue
+        w = float(it.get("weight_pct") or it.get("weight") or 0.0)
+        if w <= 0:
+            continue
+        total_weight += w
+        scode = normalize_stock_code(it.get("code", ""))
+        if not scode:
+            continue
+        sq = stock_quotes.get(scode)
+        if not sq:
+            continue
+        covered_weight += w
+        weighted_sum += w * sq.change_pct
 
-    # 降级：冻结（取 nav 或用 gsz 兜底）
-    method = constants.METHOD_FROZEN_NAV
-    est_nav = (q.nav if q and q.nav and q.nav > 0 else (q.gsz if q and q.gsz else 0.0))
-    confidence = 0.25
-    warning = "估值停更/不可用：已降级为冻结净值（仅供参考）"
-    suggested = settings.REFRESH_SEC_FROZEN
-    return method, float(est_nav), confidence, warning, suggested
+    if total_weight <= 0 or covered_weight <= 0:
+        return None
+
+    weighted_pct = weighted_sum / total_weight
+    coverage = covered_weight / total_weight * 100.0
+
+    base_nav = q.nav if q and q.nav and q.nav > 0 else 0.0
+    if base_nav <= 0:
+        base_nav, _ = _latest_official_nav(code)
+    if base_nav <= 0:
+        return None
+
+    est_nav = base_nav * (1.0 + weighted_pct / 100.0)
+    if coverage >= 80:
+        confidence = 0.75
+    elif coverage >= 50:
+        confidence = 0.55
+    else:
+        confidence = 0.35
+
+    warning = ""
+    if coverage < 60:
+        warning = f"holdings coverage low ({coverage:.1f}%)"
+    as_of = str(holdings_obj.get("as_of") or "").strip()
+    if as_of:
+        warning = f"{warning}; holdings as_of {as_of}" if warning else f"holdings as_of {as_of}"
+
+    return EstimateResult(
+        code=code,
+        name=name,
+        est_nav=est_nav,
+        est_change_pct=weighted_pct,
+        method=constants.METHOD_HOLDING_WEIGHTED,
+        confidence=confidence,
+        warning=warning,
+        suggested_refresh_sec=10,
+        est_time=now_iso(),
+        realtime_coverage_value_pct=coverage,
+    )
 
 
 def estimate_one(code: str) -> EstimateResult:
     code = (code or "").strip()
     if not code:
-        raise ValueError("code is required")
+        raise ValueError("estimate_one: code is required")
 
-    mp = estimate_many([code])
-    return mp[code]
+    quotes = fetch_gsz_quotes([code])
+    q = quotes.get(code)
+
+    profile = fund_service.get_fund_profile(code)
+    name = (profile.name or "").strip() or (q.name if q else "") or code
+
+    if profile.is_etf:
+        return _estimate_from_gsz(code, name, q, method=constants.METHOD_ETF_IIV)
+
+    holdings_obj = None if profile.is_qdii else load_holdings(code)
+    if holdings_obj and holdings_obj.get("holdings"):
+        stock_codes = [normalize_stock_code(h.get("code", "")) for h in holdings_obj.get("holdings", [])]
+        stock_quotes = fetch_stock_quotes(stock_codes)
+        est = _estimate_by_holdings(code, name, holdings_obj, stock_quotes, q)
+        if est:
+            return est
+
+    return _estimate_from_gsz(code, name, q, method=constants.METHOD_OFFICIAL_GSZ)
 
 
 def estimate_many(codes: List[str]) -> Dict[str, EstimateResult]:
-    """
-    批量估值：
-    - 本阶段使用 mock 数据源 fetch_gsz_quotes
-    - 后续替换为真实接口时，保持函数签名不变
-    """
-    codes = [str(c).strip() for c in codes if str(c).strip()]
-    quotes = fetch_gsz_quotes(codes)
+    codes = [c.strip() for c in (codes or []) if c and str(c).strip()]
+    if not codes:
+        return {}
 
-    result: Dict[str, EstimateResult] = {}
+    quotes = fetch_gsz_quotes(codes)
+    profiles = {c: fund_service.get_fund_profile(c) for c in codes}
+
+    non_etf_codes = [
+        c for c in codes
+        if not (profiles.get(c) and (profiles.get(c).is_etf or profiles.get(c).is_qdii))
+    ]
+    holdings_map = load_holdings_batch(non_etf_codes) if non_etf_codes else {}
+
+    stock_codes: List[str] = []
+    for obj in holdings_map.values():
+        for h in obj.get("holdings", []):
+            scode = normalize_stock_code(h.get("code", ""))
+            if scode:
+                stock_codes.append(scode)
+
+    stock_quotes = fetch_stock_quotes(stock_codes) if stock_codes else {}
+
+    out: Dict[str, EstimateResult] = {}
     for code in codes:
         q = quotes.get(code)
-        method, est_nav, conf, warning, suggested = route_estimation(q)
+        profile = profiles.get(code)
+        name = (profile.name if profile else "") or (q.name if q else "") or code
 
-        # 涨跌幅：优先用接口给的 gszzl；冻结时置 0（按需求文档建议）
-        if method == constants.METHOD_FROZEN_NAV:
-            est_change_pct = 0.0
-        else:
-            est_change_pct = float(q.gszzl) if q else 0.0
+        if profile and profile.is_etf:
+            out[code] = _estimate_from_gsz(code, name, q, method=constants.METHOD_ETF_IIV)
+            continue
 
-        result[code] = EstimateResult(
-            code=code,
-            name=q.name if q else f"基金{code}",
-            est_nav=float(est_nav),
-            est_change_pct=float(est_change_pct),
-            method=method,
-            confidence=float(conf),
-            warning=warning,
-            est_time=q.gztime if q else "",
-            suggested_refresh_sec=int(suggested),
-        )
+        holdings_obj = holdings_map.get(code)
+        if holdings_obj:
+            est = _estimate_by_holdings(code, name, holdings_obj, stock_quotes, q)
+            if est:
+                out[code] = est
+                continue
 
-    return result
+        out[code] = _estimate_from_gsz(code, name, q, method=constants.METHOD_OFFICIAL_GSZ)
+
+    return out

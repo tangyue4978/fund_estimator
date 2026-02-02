@@ -54,7 +54,7 @@ def _build_point_from_estimate(estimate: EstimateResult) -> Dict[str, Any]:
         "warning": estimate.warning,
         "name": getattr(estimate, "name", None),
         "est_time": getattr(estimate, "est_time", None),
-        "refresh_sec": getattr(estimate, "refresh_sec", None),
+        "refresh_sec": getattr(estimate, "suggested_refresh_sec", None),
     }
 
 
