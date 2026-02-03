@@ -328,6 +328,7 @@ def render_portfolio():
             base = total_value - total_today
             total_row["预估涨跌幅(%)"] = (total_today / base * 100.0) if abs(base) > 1e-9 else 0.0
         df_pos = pd.concat([df_pos, pd.DataFrame([total_row])], ignore_index=True)
+    detail_height = 38 + max(len(df_pos), 1) * 35
     if not df_pos.empty and "今日预计收益" in df_pos.columns:
         def _color_row(row):
             try:
@@ -343,9 +344,9 @@ def render_portfolio():
             return [f"color: {color}"] * len(row)
 
         styler = df_pos.style.apply(_color_row, axis=1)
-        st.dataframe(styler, width="stretch", hide_index=True)
+        st.dataframe(styler, width="stretch", hide_index=True, height=detail_height)
     else:
-        st.dataframe(df_pos, width="stretch", hide_index=True)
+        st.dataframe(df_pos, width="stretch", hide_index=True, height=detail_height)
 
     st.divider()
     st.subheader("编辑持仓（生成流水）")

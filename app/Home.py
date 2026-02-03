@@ -11,7 +11,9 @@ from storage import paths
 paths.ensure_dirs()
 
 import time
-import threading
+import os
+import signal
+import subprocess
 from datetime import datetime, time as dtime
 try:
     from zoneinfo import ZoneInfo
@@ -26,8 +28,7 @@ except Exception:  # pragma: no cover
 
 from services.watchlist_service import watchlist_list, watchlist_add, watchlist_remove
 from services.estimation_service import estimate_many
-from services.intraday_service import record_intraday_point, intraday_append_close_marker
-from storage.json_store import update_json, load_json
+from services.intraday_service import record_intraday_point
 
 
 st.set_page_config(page_title="Fund Estimator", layout="wide")
@@ -73,99 +74,147 @@ def _is_close_window(now: datetime) -> bool:
     return dtime(15, 0) <= t <= dtime(15, 1, 30)
 
 
-def _status_path() -> str:
-    return str(paths.data_dir() / "intraday_status.json")
+def _collector_pid_path() -> Path:
+    # 兼容旧版 storage.paths（可能没有 status_dir）
+    if hasattr(paths, "status_dir"):
+        d = paths.status_dir()
+    elif hasattr(paths, "runtime_root"):
+        d = Path(paths.runtime_root()) / "status"
+        d.mkdir(parents=True, exist_ok=True)
+    else:
+        d = PROJECT_ROOT / "storage" / "status"
+        d.mkdir(parents=True, exist_ok=True)
+    return d / "collector.pid"
 
 
-def _write_collector_status(payload: dict) -> None:
-    p = _status_path()
-    def updater(data: dict):
-        data.update(payload)
-        return data
-    update_json(p, updater)
+def _read_collector_pid() -> int | None:
+    p = _collector_pid_path()
+    try:
+        raw = p.read_text(encoding="utf-8").strip()
+        return int(raw) if raw else None
+    except Exception:
+        return None
 
 
-def _read_collector_status() -> dict:
-    return load_json(_status_path(), fallback={}) or {}
+def _write_collector_pid(pid: int) -> None:
+    _collector_pid_path().write_text(str(int(pid)), encoding="utf-8")
 
-def _collector_loop(interval_sec: int, only_trading: bool = True):
-    """
-    后台采样：
-      - only_trading=True 时，仅交易时段采样
-      - 15:00 附近自动写 CLOSE 标记点（每基金每天仅一次）
-    注意：不要在这个线程里调用 st.xxx
-    """
-    while st.session_state.get("_collector_running", False):
-        now = _now_cn()
-        ds = now.date().isoformat()
-        wrote_points = 0
 
+def _clear_collector_pid() -> None:
+    try:
+        _collector_pid_path().unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _is_pid_alive(pid: int | None) -> bool:
+    if not pid or int(pid) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _collector_running() -> bool:
+    pid = _read_collector_pid()
+    running = _is_pid_alive(pid)
+    if not running and pid:
+        _clear_collector_pid()
+    return running
+
+
+def _start_collector(interval_sec: int, only_trading: bool) -> tuple[bool, str]:
+    if _collector_running():
+        return True, "already_running"
+    cmd = [
+        sys.executable,
+        "-m",
+        "scripts.intraday_collector",
+        "--interval",
+        str(max(3, int(interval_sec))),
+    ]
+    if only_trading:
+        cmd.append("--only-trading")
+    try:
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+        _write_collector_pid(proc.pid)
+        return True, f"pid={proc.pid}"
+    except Exception as e:
+        return False, str(e)
+
+
+def _stop_collector() -> tuple[bool, str]:
+    pid = _read_collector_pid()
+    if not pid:
+        return True, "not_running"
+    try:
         try:
-            codes = watchlist_list()
-
-            # 1) 收盘标记点（15:00 窗口）
-            if codes and _is_close_window(now):
-                est_map = estimate_many(codes)
-                for c in codes:
-                    est = est_map.get(c)
-                    intraday_append_close_marker(
-                        target=c,
-                        estimate=est,
-                        date_str=ds,
-                    )
-
-            # 2) 盘中采样
-            if codes and (not only_trading or _is_cn_trading_time(now)):
-                est_map = estimate_many(codes)
-                for c in codes:
-                    est = est_map.get(c)
-                    if not est:
-                        continue
-                    record_intraday_point(
-                        target=c,
-                        estimate=est,
-                        date_str=ds,
-                    )
-                    wrote_points += 1
-
+            os.kill(int(pid), signal.SIGTERM)
         except Exception:
-            # 避免线程异常导致整个采样停掉
-            pass
-
-        time.sleep(max(3, int(interval_sec)))
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+        time.sleep(0.2)
+        if _is_pid_alive(pid):
+            return False, f"collector still running (pid={pid})"
+        _clear_collector_pid()
+        return True, "stopped"
+    except Exception as e:
+        return False, str(e)
 
 
 def render_watchlist():
     st.title("自选基金 - 实时预估")
+    flash = st.session_state.pop("_collector_flash", None)
+    if isinstance(flash, dict):
+        text = str(flash.get("text", "")).strip()
+        icon = str(flash.get("icon", ""))
+        if text:
+            st.toast(text, icon=icon or None)
 
     st.sidebar.header("盘中采样")
     only_trading = st.sidebar.checkbox("仅交易时段采样", value=True)
     interval = st.sidebar.number_input("采样间隔（秒）", min_value=5, max_value=120, value=10, step=5)
 
-    if "_collector_running" not in st.session_state:
-        st.session_state["_collector_running"] = False
-
     col_s1, col_s2 = st.sidebar.columns(2)
+    running = _collector_running()
 
     with col_s1:
         if st.button("启动采样", width="stretch"):
-            if not st.session_state["_collector_running"]:
-                st.session_state["_collector_running"] = True
-                th = threading.Thread(
-                    target=_collector_loop,
-                    args=(int(interval), bool(only_trading)),
-                    daemon=True,
-                )
-                st.session_state["_collector_thread"] = th
-                th.start()
-                st.toast("采样已启动", icon="🟢")
+            ok, msg = _start_collector(int(interval), bool(only_trading))
+            if ok:
+                st.session_state["_collector_flash"] = {"text": "采样已启动（独立后台进程）", "icon": "🟢"}
+            else:
+                st.session_state["_collector_flash"] = {"text": f"采样启动失败：{msg}", "icon": "❌"}
+            st.rerun()
 
     with col_s2:
         if st.button("停止采样", width="stretch"):
-            st.session_state["_collector_running"] = False
-            st.toast("采样已停止", icon="🛑")
+            ok, msg = _stop_collector()
+            if ok:
+                st.session_state["_collector_flash"] = {"text": "采样已停止", "icon": "🛑"}
+            else:
+                st.session_state["_collector_flash"] = {"text": f"停止失败：{msg}", "icon": "❌"}
+            st.rerun()
 
-    st.sidebar.caption("提示：采样依赖页面会话；关闭浏览器/停止 Streamlit 会停止采样。")
+    st.sidebar.caption(
+        f"采样状态：{'运行中' if running else '未运行'}。采样为独立后台进程，切换到其他 tab 也会继续。"
+    )
 
     col1, col2, col3 = st.columns([2, 1, 1])
 

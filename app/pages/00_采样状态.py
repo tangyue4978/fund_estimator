@@ -1,17 +1,44 @@
 import json
+import sys
 from pathlib import Path
 from datetime import datetime
 
 import streamlit as st
 
-# =========
-# 路径兜底：从当前文件定位到项目根目录
-# app/pages/00_Collector_Status.py -> parents[2] = 项目根目录
-# =========
 BASE_DIR = Path(__file__).resolve().parents[2]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
-LOG_PATH = BASE_DIR / "storage" / "logs" / "collector.log"
-STATUS_PATH = BASE_DIR / "storage" / "status" / "collector_status.json"
+from storage import paths
+
+
+def _first_existing(cands: list[Path]) -> Path:
+    for p in cands:
+        if p.exists():
+            return p
+    return cands[0]
+
+
+status_candidates: list[Path] = []
+log_candidates: list[Path] = []
+
+if hasattr(paths, "file_collector_status"):
+    status_candidates.append(Path(paths.file_collector_status()))
+if hasattr(paths, "file_collector_log"):
+    log_candidates.append(Path(paths.file_collector_log()))
+if hasattr(paths, "status_dir"):
+    status_candidates.append(Path(paths.status_dir()) / "collector_status.json")
+if hasattr(paths, "runtime_root"):
+    rt = Path(paths.runtime_root())
+    status_candidates.append(rt / "status" / "collector_status.json")
+    log_candidates.append(rt / "logs" / "collector.log")
+
+# 旧位置兜底（项目内 storage 目录）
+status_candidates.append(BASE_DIR / "storage" / "status" / "collector_status.json")
+log_candidates.append(BASE_DIR / "storage" / "logs" / "collector.log")
+
+STATUS_PATH = _first_existing(status_candidates)
+LOG_PATH = _first_existing(log_candidates)
 
 st.set_page_config(page_title="采集器状态", layout="wide")
 st.title("📡 采集器状态 / 心跳监控")
