@@ -108,14 +108,35 @@ def _clear_collector_pid() -> None:
 
 
 def _is_pid_alive(pid: int | None) -> bool:
-    if not pid or int(pid) <= 0:
+    if not pid:
         return False
     try:
-        os.kill(int(pid), 0)
+        pid_i = int(pid)
+    except Exception:
+        return False
+    if pid_i <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            proc = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid_i}", "/FO", "CSV", "/NH"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+            out = (proc.stdout or "").strip()
+            if (not out) or out.upper().startswith("INFO:"):
+                return False
+            return f'"{pid_i}"' in out
+        except Exception:
+            return False
+    try:
+        os.kill(pid_i, 0)
         return True
     except PermissionError:
         return True
-    except OSError:
+    except (OSError, SystemError, ValueError, TypeError):
         return False
 
 

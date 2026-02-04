@@ -93,6 +93,14 @@ def _is_pid_alive(pid: int | None) -> bool:
         return False
 
 
+def _pick_available_port(host: str, preferred_port: int) -> int:
+    if preferred_port > 0 and (not _is_port_open(host, preferred_port)):
+        return preferred_port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
+        return int(s.getsockname()[1])
+
+
 def _acquire_lock_with_recovery(lock_path: Path) -> bool:
     if _acquire_lock(lock_path):
         return True
@@ -124,9 +132,24 @@ def _run_collector_inproc() -> None:
 
 def _run_streamlit_inproc(root: Path, port: int) -> None:
     try:
+        import signal
         from streamlit.web import cli as stcli
 
         app_path = _resolve_streamlit_app(root)
+        # Force packaged app to run in production mode even if user-level
+        # Streamlit config has global.developmentMode=true.
+        os.environ["STREAMLIT_GLOBAL_DEVELOPMENT_MODE"] = "false"
+        original_signal = signal.signal
+
+        def _safe_signal(sig: int, handler):  # type: ignore[no-untyped-def]
+            try:
+                return original_signal(sig, handler)
+            except ValueError:
+                # Streamlit installs signal handlers; in frozen mode we run it in
+                # a worker thread where signal.signal is not allowed.
+                return None
+
+        signal.signal = _safe_signal  # type: ignore[assignment]
         sys.argv = [
             "streamlit",
             "run",
@@ -139,8 +162,13 @@ def _run_streamlit_inproc(root: Path, port: int) -> None:
             "false",
             "--server.fileWatcherType",
             "none",
+            "--global.developmentMode",
+            "false",
         ]
-        stcli.main()
+        try:
+            stcli.main()
+        finally:
+            signal.signal = original_signal  # type: ignore[assignment]
     except Exception:
         _write_startup_log("streamlit inproc failed", traceback.format_exc())
 
@@ -173,12 +201,39 @@ def _write_startup_log(msg: str, detail: str = "") -> None:
         pass
 
 
+def _show_error_dialog(title: str, message: str) -> None:
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)
+    except Exception:
+        pass
+
+
+def _read_last_port(path: Path) -> int | None:
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        port = int(raw) if raw else 0
+        return port if port > 0 else None
+    except Exception:
+        return None
+
+
+def _write_last_port(path: Path, port: int) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(int(port)), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def main() -> int:
     paths.ensure_dirs()
 
     bundle_root = _bundle_root()
-    host, port = "127.0.0.1", 8501
-    url = f"http://{host}:{port}"
+    host = "127.0.0.1"
 
     # Lock goes to writable runtime directory (e.g. %LOCALAPPDATA%\FundEstimator\status)
     if hasattr(paths, "status_dir"):
@@ -190,47 +245,78 @@ def main() -> int:
         lock_base = Path.home() / ".fund_estimator" / "status"
         lock_base.mkdir(parents=True, exist_ok=True)
     lock_path = lock_base / "desktop.lock"
+    port_path = lock_base / "desktop_port.txt"
+    last_port = _read_last_port(port_path)
     if not _acquire_lock_with_recovery(lock_path):
-        if _is_port_open(host, port):
-            webbrowser.open(url)
-        return 0
-
-    if not _is_port_open(host, port):
-        if _is_frozen():
-            t1 = threading.Thread(target=_run_streamlit_inproc, args=(bundle_root, port), daemon=True)
-            t1.start()
-
-            t2 = threading.Thread(target=_run_collector_inproc, daemon=True)
-            t2.start()
-        else:
-            _spawn_collector_dev(bundle_root)
-
-            cmd = [
-                sys.executable,
-                "-m",
-                "streamlit",
-                "run",
-                str(bundle_root / "app" / "Home.py"),
-                "--server.port",
-                str(port),
-                "--server.headless",
-                "true",
-                "--browser.gatherUsageStats",
-                "false",
-                "--server.fileWatcherType",
-                "none",
-            ]
-            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            subprocess.Popen(cmd, cwd=str(bundle_root), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
-
-        for _ in range(250):
-            if _is_port_open(host, port):
+        probe_ports = [p for p in (last_port, 8501) if p]
+        for p in probe_ports:
+            if _is_port_open(host, p):
+                webbrowser.open(f"http://{host}:{p}")
                 break
-            time.sleep(0.1)
+        return 0
+
+    preferred_port = last_port or 8501
+    port = _pick_available_port(host, preferred_port)
+    _write_last_port(port_path, port)
+    url = f"http://{host}:{port}"
+
+    if _is_frozen():
+        t1 = threading.Thread(target=_run_streamlit_inproc, args=(bundle_root, port), daemon=True)
+        t1.start()
+
+        t2 = threading.Thread(target=_run_collector_inproc, daemon=True)
+        t2.start()
+    else:
+        _spawn_collector_dev(bundle_root)
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "streamlit",
+            "run",
+            str(bundle_root / "app" / "Home.py"),
+            "--server.port",
+            str(port),
+            "--server.headless",
+            "true",
+            "--browser.gatherUsageStats",
+            "false",
+            "--server.fileWatcherType",
+            "none",
+            "--global.developmentMode",
+            "false",
+        ]
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        env = os.environ.copy()
+        env["STREAMLIT_GLOBAL_DEVELOPMENT_MODE"] = "false"
+        subprocess.Popen(
+            cmd,
+            cwd=str(bundle_root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+            env=env,
+        )
+
+    for _ in range(250):
+        if _is_port_open(host, port):
+            break
+        time.sleep(0.1)
 
     if not _is_port_open(host, port):
-        webbrowser.open(url)
-        return 0
+        _write_startup_log(
+            "streamlit startup timeout",
+            f"host={host} port={port} bundle_root={bundle_root}",
+        )
+        _show_error_dialog(
+            "Fund Estimator",
+            (
+                "Desktop app failed to start.\n\n"
+                "Please open startup log:\n"
+                f"{_startup_log_path()}"
+            ),
+        )
+        return 1
 
     try:
         import webview

@@ -57,6 +57,8 @@ def build(*, onefile: bool, clean: bool) -> None:
         str(work_path),
         "--specpath",
         str(PROJECT_ROOT),
+        "--paths",
+        str(PROJECT_ROOT),
     ]
 
     cmd.append("--onefile" if onefile else "--onedir")
@@ -67,6 +69,8 @@ def build(*, onefile: bool, clean: bool) -> None:
         (PROJECT_ROOT / "app", "app"),
         (PROJECT_ROOT / "config", "config"),
         (PROJECT_ROOT / "data", "data"),
+        (PROJECT_ROOT / "services", "services"),
+        (PROJECT_ROOT / "storage", "storage"),
     )
     for src, dst in data_dirs:
         cmd += ["--add-data", _add_data_arg(src, dst)]
@@ -83,9 +87,26 @@ def build(*, onefile: bool, clean: bool) -> None:
     for pkg in collect_all:
         cmd += ["--collect-all", pkg]
 
-    hidden_imports = ("streamlit.web.cli",)
+    hidden_imports = (
+        "streamlit.web.cli",
+        # Streamlit pages import service modules dynamically at runtime.
+        "services.portfolio_service",
+        "services.watchlist_service",
+        "services.estimation_service",
+        "services.intraday_service",
+        "services.settlement_service",
+        "services.snapshot_service",
+        "services.history_service",
+        "services.adjustment_service",
+        "services.accuracy_service",
+        "services.edit_bridge_service",
+        "services.fund_service",
+    )
     for mod in hidden_imports:
         cmd += ["--hidden-import", mod]
+
+    for pkg in ("services", "storage"):
+        cmd += ["--collect-submodules", pkg]
 
     cmd.append(str(entry))
 

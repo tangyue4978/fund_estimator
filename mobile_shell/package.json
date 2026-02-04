@@ -1,0 +1,24 @@
+{
+  "name": "fund-estimator-mobile-shell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Android WebView shell for Fund Estimator Streamlit service",
+  "scripts": {
+    "sync": "npx cap sync android",
+    "open:android": "npx cap open android",
+    "build:debug": "cd android && gradlew.bat assembleDebug",
+    "build:release": "cd android && gradlew.bat assembleRelease",
+    "signing:setup": "powershell -ExecutionPolicy Bypass -File .\\scripts\\configure_release_signing.ps1",
+    "build:release:signed": "powershell -ExecutionPolicy Bypass -File .\\scripts\\build_release.ps1 -Artifact both",
+    "build:release:oneclick": "powershell -ExecutionPolicy Bypass -File .\\scripts\\one_click_release.ps1 -Artifact both",
+    "build:release:silent": "powershell -ExecutionPolicy Bypass -File .\\scripts\\one_click_release_silent.ps1 -Artifact both"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/core": "^6.1.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.2",
+    "typescript": "^5.8.3"
+  }
+}

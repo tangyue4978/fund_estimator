@@ -1,6 +1,7 @@
 # Fund Estimator Packaging Guide
 
 This project now supports packaging to a distributable Windows desktop executable.
+It also includes an Android WebView shell scaffold under `mobile_shell/`.
 
 ## 1) Prepare environment
 
@@ -56,5 +57,7 @@ Output:
 ## Notes
 
 - Entry point for desktop app: `scripts/run_desktop.py`
+- Entry point for Android LAN backend mode: `scripts/run_mobile_server.py`
 - Build helper script: `scripts/build_exe.py`
 - If build fails with missing packages, check internal network/proxy settings first.
+- Android shell instructions: `mobile_shell/README.md`

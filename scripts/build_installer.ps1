@@ -24,6 +24,9 @@ Push-Location $projectRoot
 try {
     if ($BuildExe) {
         .\.venv\Scripts\python.exe scripts\build_exe.py --clean
+        if ($LASTEXITCODE -ne 0) {
+            throw "EXE build failed with exit code $LASTEXITCODE. Stop installer packaging to avoid stale artifacts."
+        }
     }
 
     $isccPath = Resolve-IsccPath
