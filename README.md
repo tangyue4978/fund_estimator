@@ -81,3 +81,4 @@ Notes:
 - Multi-user split is file-based by `User ID`, with per-user paths under `~/.fund_estimator/data/users/<user_id>`.
 - Auth is phone+password (no SMS verification), password min length is 6.
 - After login, user data is isolated under `~/.fund_estimator/data/users/u_<phone>/`.
+- If Supabase secrets are configured, auth/watchlist/adjustments/daily_ledger are stored online first.

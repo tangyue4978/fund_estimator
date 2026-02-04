@@ -7,6 +7,7 @@ from config import constants
 from datasources.nav_api import fetch_official_nav_for_date
 from services.portfolio_service import position_list
 from services.estimation_service import estimate_many
+from services import supabase_client
 from storage import paths
 from storage.json_store import ensure_json_file, update_json
 
@@ -18,6 +19,24 @@ def _now_iso() -> str:
 
 
 def _load_ledger() -> dict:
+    if supabase_client.is_enabled():
+        try:
+            rows = supabase_client.get_rows(
+                "app_daily_ledger",
+                params={
+                    "user_id": f"eq.{paths.current_user_id()}",
+                    "select": (
+                        "date,code,shares_end,avg_cost_nav_end,realized_pnl_end,"
+                        "estimated_nav_close,estimated_pnl_close,official_nav,official_pnl,"
+                        "settle_status,updated_at"
+                    ),
+                    "order": "date.asc,code.asc",
+                },
+            )
+            return {"items": [x for x in rows if isinstance(x, dict)]}
+        except Exception:
+            pass
+
     p = paths.file_daily_ledger()
     res = ensure_json_file(p)
     data = res.data if isinstance(res.data, dict) else {}
@@ -43,6 +62,74 @@ def finalize_estimated_close(date_str: Optional[str] = None) -> dict:
         return _load_ledger()
 
     est_map = estimate_many(codes)
+    if supabase_client.is_enabled():
+        try:
+            uid = paths.current_user_id()
+            existing_rows = supabase_client.get_rows(
+                "app_daily_ledger",
+                params={
+                    "user_id": f"eq.{uid}",
+                    "date": f"eq.{d}",
+                    "select": (
+                        "date,code,shares_end,avg_cost_nav_end,realized_pnl_end,"
+                        "estimated_nav_close,estimated_pnl_close,official_nav,official_pnl,"
+                        "settle_status,updated_at"
+                    ),
+                },
+            )
+            existing_map = {
+                (str(r.get("date")), str(r.get("code"))): r
+                for r in existing_rows
+                if isinstance(r, dict)
+            }
+            upserts = []
+            for s in snapshots:
+                est = est_map.get(s.code)
+                est_nav = est.est_nav if est else 0.0
+
+                shares_end = float(s.shares_end)
+                avg_cost_nav_end = float(s.avg_cost_nav_end)
+                realized_pnl_end = float(s.realized_pnl_end)
+
+                cost = shares_end * avg_cost_nav_end
+                est_value = shares_end * est_nav
+                est_pnl = est_value - cost + realized_pnl_end
+
+                payload = {
+                    "user_id": uid,
+                    "date": d,
+                    "code": s.code,
+                    "shares_end": shares_end,
+                    "avg_cost_nav_end": avg_cost_nav_end,
+                    "realized_pnl_end": realized_pnl_end,
+                    "estimated_nav_close": float(est_nav),
+                    "estimated_pnl_close": float(est_pnl),
+                    "official_nav": None,
+                    "official_pnl": None,
+                    "settle_status": constants.SETTLE_ESTIMATED_ONLY,
+                    "updated_at": _now_iso(),
+                }
+
+                cur = existing_map.get((d, s.code))
+                if cur and cur.get("settle_status") == constants.SETTLE_SETTLED:
+                    payload["official_nav"] = cur.get("official_nav")
+                    payload["official_pnl"] = cur.get("official_pnl")
+                    payload["settle_status"] = constants.SETTLE_SETTLED
+
+                upserts.append(payload)
+
+            if upserts:
+                resp = supabase_client.upsert_rows(
+                    "app_daily_ledger",
+                    upserts,
+                    on_conflict="user_id,date,code",
+                )
+                if resp.status_code not in (200, 201):
+                    raise RuntimeError(f"finalize upsert failed({resp.status_code})")
+            return _load_ledger()
+        except Exception:
+            pass
+
     ledger_path = paths.file_daily_ledger()
 
     def updater(data: dict):
@@ -103,6 +190,63 @@ def settle_day(date_str: str) -> Tuple[dict, int]:
     - 严格 nav_date == date_str 才覆盖
     - official_pnl 与 estimated_pnl 口径一致（包含 realized_pnl_end）
     """
+    if supabase_client.is_enabled():
+        try:
+            uid = paths.current_user_id()
+            rows = supabase_client.get_rows(
+                "app_daily_ledger",
+                params={
+                    "user_id": f"eq.{uid}",
+                    "date": f"eq.{date_str}",
+                    "select": (
+                        "date,code,shares_end,avg_cost_nav_end,realized_pnl_end,"
+                        "estimated_nav_close,estimated_pnl_close,official_nav,official_pnl,"
+                        "settle_status,updated_at"
+                    ),
+                },
+            )
+            settled = 0
+            upserts = []
+            for it in rows:
+                if not isinstance(it, dict):
+                    continue
+                if it.get("settle_status") == constants.SETTLE_SETTLED:
+                    continue
+
+                code = str(it.get("code"))
+                off = fetch_official_nav_for_date(code, date_str)
+                if not off:
+                    continue
+
+                official_nav = float(off.nav)
+                shares_end = float(it.get("shares_end", 0.0))
+                avg_cost_nav_end = float(it.get("avg_cost_nav_end", 0.0))
+                realized_pnl_end = float(it.get("realized_pnl_end", 0.0))
+
+                cost = shares_end * avg_cost_nav_end
+                official_value = shares_end * official_nav
+                official_pnl = official_value - cost + realized_pnl_end
+
+                it["official_nav"] = official_nav
+                it["official_pnl"] = float(official_pnl)
+                it["settle_status"] = constants.SETTLE_SETTLED
+                it["updated_at"] = _now_iso()
+                it["user_id"] = uid
+                upserts.append(it)
+                settled += 1
+
+            if upserts:
+                resp = supabase_client.upsert_rows(
+                    "app_daily_ledger",
+                    upserts,
+                    on_conflict="user_id,date,code",
+                )
+                if resp.status_code not in (200, 201):
+                    raise RuntimeError(f"settle upsert failed({resp.status_code})")
+            return _load_ledger(), settled
+        except Exception:
+            pass
+
     ledger_path = paths.file_daily_ledger()
 
     def updater(data: dict):

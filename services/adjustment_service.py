@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 
+from services import supabase_client
 from storage import paths
 from storage.json_store import ensure_json_file, update_json
 
@@ -13,6 +14,20 @@ def _now_iso() -> str:
 
 
 def list_adjustments(code: Optional[str] = None) -> List[dict]:
+    if supabase_client.is_enabled():
+        try:
+            params = {
+                "user_id": f"eq.{paths.current_user_id()}",
+                "select": "id,type,code,effective_date,shares,price,cash,note,created_at",
+                "order": "effective_date.asc,created_at.asc",
+            }
+            if code:
+                params["code"] = f"eq.{code.strip()}"
+            rows = supabase_client.get_rows("app_adjustments", params=params)
+            return [x for x in rows if isinstance(x, dict)]
+        except Exception:
+            pass
+
     p = paths.file_adjustments()
     res = ensure_json_file(p)
     data = res.data if isinstance(res.data, dict) else {}
@@ -22,7 +37,6 @@ def list_adjustments(code: Optional[str] = None) -> List[dict]:
     if code:
         code = code.strip()
         items = [x for x in items if str(x.get("code")) == code]
-    # 按日期 + 创建时间排序
     items.sort(key=lambda x: (str(x.get("effective_date", "")), str(x.get("created_at", ""))))
     return items
 
@@ -37,12 +51,6 @@ def add_adjustment(
     cash: float = 0.0,
     note: Optional[str] = None,
 ) -> dict:
-    """
-    写入一条流水：
-    - BUY: shares>0, price>0
-    - SELL: shares>0, price>0（shares 表示卖出的份额）
-    - CASH_ADJ: cash 可正可负（例如分红/修正）
-    """
     type = (type or "").strip().upper()
     code = (code or "").strip()
     effective_date = (effective_date or "").strip()
@@ -59,9 +67,6 @@ def add_adjustment(
             raise ValueError("shares must be > 0 for BUY/SELL")
         if price <= 0:
             raise ValueError("price must be > 0 for BUY/SELL")
-    if type == "CASH_ADJ":
-        # cash 允许 0 但没意义，这里允许
-        pass
 
     item = {
         "id": uuid.uuid4().hex,
@@ -74,6 +79,17 @@ def add_adjustment(
         "note": note,
         "created_at": _now_iso(),
     }
+
+    if supabase_client.is_enabled():
+        try:
+            payload = dict(item)
+            payload["user_id"] = paths.current_user_id()
+            resp = supabase_client.insert_row("app_adjustments", payload)
+            if resp.status_code not in (200, 201):
+                raise RuntimeError(f"add adjustment failed({resp.status_code})")
+            return {"items": list_adjustments(), "updated_at": _now_iso()}
+        except Exception:
+            pass
 
     p = paths.file_adjustments()
 
@@ -94,6 +110,18 @@ def remove_adjustment(adj_id: str) -> dict:
     if not adj_id:
         raise ValueError("adj_id is required")
 
+    if supabase_client.is_enabled():
+        try:
+            resp = supabase_client.delete_rows(
+                "app_adjustments",
+                {"user_id": f"eq.{paths.current_user_id()}", "id": f"eq.{adj_id}"},
+            )
+            if resp.status_code not in (200, 204):
+                raise RuntimeError(f"remove adjustment failed({resp.status_code})")
+            return {"items": list_adjustments(), "updated_at": _now_iso()}
+        except Exception:
+            pass
+
     p = paths.file_adjustments()
 
     def updater(data: dict):
@@ -108,6 +136,18 @@ def remove_adjustment(adj_id: str) -> dict:
 
 
 def clear_adjustments() -> None:
+    if supabase_client.is_enabled():
+        try:
+            resp = supabase_client.delete_rows(
+                "app_adjustments",
+                {"user_id": f"eq.{paths.current_user_id()}"},
+            )
+            if resp.status_code not in (200, 204):
+                raise RuntimeError(f"clear adjustments failed({resp.status_code})")
+            return
+        except Exception:
+            pass
+
     p = paths.file_adjustments()
 
     def updater(data: dict):
@@ -122,6 +162,23 @@ def remove_adjustments_by_code(code: str) -> int:
     code = (code or "").strip()
     if not code:
         raise ValueError("code is required")
+
+    if supabase_client.is_enabled():
+        try:
+            uid = paths.current_user_id()
+            rows = supabase_client.get_rows(
+                "app_adjustments",
+                params={"user_id": f"eq.{uid}", "code": f"eq.{code}", "select": "id"},
+            )
+            resp = supabase_client.delete_rows(
+                "app_adjustments",
+                {"user_id": f"eq.{uid}", "code": f"eq.{code}"},
+            )
+            if resp.status_code not in (200, 204):
+                raise RuntimeError(f"remove by code failed({resp.status_code})")
+            return len(rows)
+        except Exception:
+            pass
 
     p = paths.file_adjustments()
     removed = {"count": 0}

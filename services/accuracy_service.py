@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import date, timedelta
 
+from services import supabase_client
 from storage import paths
 from storage.json_store import load_json
 
@@ -31,6 +32,22 @@ def _read_daily_ledger_items() -> List[dict]:
     """
     读取 daily_ledger.json 的 items
     """
+    if supabase_client.is_enabled():
+        try:
+            rows = supabase_client.get_rows(
+                "app_daily_ledger",
+                params={
+                    "user_id": f"eq.{paths.current_user_id()}",
+                    "select": (
+                        "date,code,shares_end,estimated_nav_close,official_nav,settle_status"
+                    ),
+                    "order": "date.asc,code.asc",
+                },
+            )
+            return [x for x in rows if isinstance(x, dict)]
+        except Exception:
+            pass
+
     p = paths.file_daily_ledger()
     data = load_json(p, fallback={"items": []})
     items = data.get("items", [])

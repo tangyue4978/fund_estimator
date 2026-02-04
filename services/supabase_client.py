@@ -67,6 +67,18 @@ def insert_row(table: str, row: Dict[str, Any]) -> requests.Response:
     return resp
 
 
+def upsert_rows(table: str, rows: list[Dict[str, Any]], on_conflict: str) -> requests.Response:
+    url, _ = get_config()
+    resp = requests.post(
+        f"{url}/rest/v1/{table}",
+        params={"on_conflict": on_conflict},
+        json=rows,
+        headers=_headers({"Prefer": "resolution=merge-duplicates,return=representation"}),
+        timeout=12,
+    )
+    return resp
+
+
 def delete_rows(table: str, params: Dict[str, str]) -> requests.Response:
     url, _ = get_config()
     resp = requests.delete(

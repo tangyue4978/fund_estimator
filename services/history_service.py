@@ -4,11 +4,29 @@ from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from config import constants
+from services import supabase_client
 from storage import paths
 from storage.json_store import ensure_json_file
 
 
 def _load_ledger_items() -> List[dict]:
+    if supabase_client.is_enabled():
+        try:
+            rows = supabase_client.get_rows(
+                "app_daily_ledger",
+                params={
+                    "user_id": f"eq.{paths.current_user_id()}",
+                    "select": (
+                        "date,code,shares_end,avg_cost_nav_end,realized_pnl_end,"
+                        "estimated_nav_close,official_nav,settle_status"
+                    ),
+                    "order": "date.asc,code.asc",
+                },
+            )
+            return [x for x in rows if isinstance(x, dict)]
+        except Exception:
+            pass
+
     p = paths.file_daily_ledger()
     res = ensure_json_file(p)
     data = res.data if isinstance(res.data, dict) else {}
