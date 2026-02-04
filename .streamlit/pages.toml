@@ -1,0 +1,24 @@
+﻿[[pages]]
+path = "app/Home.py"
+name = "自选基金"
+icon = ":material/home:"
+
+[[pages]]
+path = "app/pages/00_采样状态.py"
+name = "采样状态"
+icon = ":material/monitoring:"
+
+[[pages]]
+path = "app/pages/01_持仓.py"
+name = "持仓"
+icon = ":material/account_balance_wallet:"
+
+[[pages]]
+path = "app/pages/02_日结.py"
+name = "日结"
+icon = ":material/receipt_long:"
+
+[[pages]]
+path = "app/pages/03_基金详情.py"
+name = "基金详情"
+icon = ":material/finance:"

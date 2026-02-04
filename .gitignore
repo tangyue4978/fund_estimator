@@ -24,7 +24,9 @@ ENV/
 ############################
 # Streamlit
 ############################
-.streamlit/
+.streamlit/*
+!.streamlit/pages.toml
+!.streamlit/config.toml
 .streamlit/secrets.toml
 
 ############################
@@ -32,7 +34,7 @@ ENV/
 # ⚠️ 这些都是用户真实数据，绝对不能进 git
 ############################
 data/
-storage/
+storage/status/
 
 ############################
 # 日志
