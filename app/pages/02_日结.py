@@ -9,11 +9,13 @@ import streamlit as st
 from datetime import date
 
 from storage import paths
+from services.auth_guard import require_login
 from storage.json_store import load_json
 from services.settlement_service import finalize_estimated_close, settle_day, settle_pending_days
 
 
 st.set_page_config(page_title="Ledger", layout="wide")
+require_login()
 
 def fix_bad_sells_in_adjustments() -> int:
     from storage import paths

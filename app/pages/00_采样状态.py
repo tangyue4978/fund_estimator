@@ -10,6 +10,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from storage import paths
+from services.auth_guard import require_login
 
 
 def _first_existing(cands: list[Path]) -> Path:
@@ -41,6 +42,7 @@ STATUS_PATH = _first_existing(status_candidates)
 LOG_PATH = _first_existing(log_candidates)
 
 st.set_page_config(page_title="采集器状态", layout="wide")
+require_login()
 st.title("📡 采集器状态 / 心跳监控")
 
 

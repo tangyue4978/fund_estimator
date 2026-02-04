@@ -26,11 +26,13 @@ from services.intraday_service import intraday_load_fund_series, record_intraday
 from services.history_service import fund_history
 from storage.json_store import load_json
 from storage import paths
+from services.auth_guard import require_login
 from services.accuracy_service import fund_gap_summary, guess_gap_reasons, fund_gap_table
 from services.fund_service import get_fund_profile
 
 
 st.set_page_config(page_title="Fund Detail", layout="wide")
+require_login()
 
 # auto refresh
 AUTO_REFRESH_SEC = 10

@@ -78,3 +78,6 @@ Output:
 Notes:
 - `pywebview` is installed only on Windows; cloud deployment skips it automatically.
 - Streamlit Cloud filesystem is ephemeral. Runtime data is redirected to `~/.fund_estimator/data` in cloud runs.
+- Multi-user split is file-based by `User ID`, with per-user paths under `~/.fund_estimator/data/users/<user_id>`.
+- Auth is phone+password (no SMS verification), password min length is 6.
+- After login, user data is isolated under `~/.fund_estimator/data/users/u_<phone>/`.

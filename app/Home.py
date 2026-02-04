@@ -8,6 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # ✅ 关键：最早期初始化运行时目录（开发=项目目录；打包=AppData）
 from storage import paths
+from services.auth_guard import require_login
 paths.ensure_dirs()
 
 import time
@@ -32,6 +33,7 @@ from services.intraday_service import record_intraday_point
 
 
 st.set_page_config(page_title="Fund Estimator", layout="wide")
+require_login()
 
 # auto refresh (Home)
 HOME_AUTO_REFRESH_SEC = 10

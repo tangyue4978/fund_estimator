@@ -21,14 +21,16 @@ from services.fund_service import get_fund_profile
 from services.estimation_service import estimate_one
 from services import adjustment_service
 from storage import paths
+from services.auth_guard import require_login
 from storage.json_store import load_json, update_json
 
 
 st.set_page_config(page_title="Portfolio", layout="wide")
+require_login()
 
 
 def _input_amount_path() -> str:
-    return str(paths.data_dir() / "position_input_amounts.json")
+    return str(paths.user_data_dir() / "position_input_amounts.json")
 
 
 def _load_input_amount_map(date_str: str) -> dict:

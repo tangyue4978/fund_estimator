@@ -9,6 +9,9 @@ from pathlib import Path
 
 
 APP_NAME = "FundEstimator"
+_USER_ID_ENV = "FUND_ESTIMATOR_USER_ID"
+_DEFAULT_USER_ID = "public"
+_active_user_id: str | None = None
 _SEEDED_FILES = (
     "fund_cache.json",
     "fund_profile_map.json",
@@ -58,6 +61,56 @@ def _is_streamlit_cloud() -> bool:
     return bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
 
 
+def _sanitize_user_id(user_id: str | None) -> str:
+    raw = str(user_id or "").strip().lower()
+    cleaned = re.sub(r"[^a-z0-9_.-]+", "_", raw).strip("._-")
+    return cleaned or _DEFAULT_USER_ID
+
+
+def set_active_user(user_id: str | None) -> str:
+    global _active_user_id
+    uid = _sanitize_user_id(user_id)
+    _active_user_id = uid
+    os.environ[_USER_ID_ENV] = uid
+    return uid
+
+
+def current_user_id() -> str:
+    global _active_user_id
+    if _active_user_id:
+        return _active_user_id
+
+    env_uid = os.getenv(_USER_ID_ENV, "").strip()
+    if env_uid:
+        _active_user_id = _sanitize_user_id(env_uid)
+        return _active_user_id
+
+    # Optional Streamlit context read; only when running inside a Streamlit script context.
+    try:
+        if "streamlit" in sys.modules:
+            from streamlit.runtime.scriptrunner import get_script_run_ctx  # type: ignore
+
+            if get_script_run_ctx() is not None:
+                import streamlit as st  # type: ignore
+
+                session_uid = st.session_state.get("fund_estimator_user_id", "")
+                if session_uid:
+                    _active_user_id = _sanitize_user_id(str(session_uid))
+                    return _active_user_id
+
+                qp_uid = st.query_params.get("user", "")
+                if isinstance(qp_uid, list):
+                    qp_uid = qp_uid[0] if qp_uid else ""
+                if qp_uid:
+                    _active_user_id = _sanitize_user_id(str(qp_uid))
+                    return _active_user_id
+    except Exception:
+        pass
+
+    _active_user_id = _DEFAULT_USER_ID
+    return _active_user_id
+
+
 def project_root() -> Path:
     # Backward-compatible alias for old call sites.
     return bundle_root()
@@ -73,6 +126,24 @@ def data_dir() -> Path:
     return project_root() / "data"
 
 
+def user_data_dir(user_id: str | None = None) -> Path:
+    uid = _sanitize_user_id(user_id) if user_id is not None else current_user_id()
+    d = data_dir() / "users" / uid
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _user_file_with_legacy_seed(filename: str) -> Path:
+    user_path = user_data_dir() / filename
+    legacy_path = data_dir() / filename
+    if (not user_path.exists()) and legacy_path.exists():
+        try:
+            shutil.copy2(legacy_path, user_path)
+        except Exception:
+            pass
+    return user_path
+
+
 def ensure_data_dir() -> Path:
     d = data_dir()
     d.mkdir(parents=True, exist_ok=True)
@@ -86,34 +157,30 @@ def _safe_filename(key: str) -> str:
 
 # ---------- common data files ----------
 def file_watchlist() -> str:
-    ensure_data_dir()
-    return str(data_dir() / "watchlist.json")
+    return str(_user_file_with_legacy_seed("watchlist.json"))
 
 
 def file_portfolio() -> str:
-    ensure_data_dir()
-    return str(data_dir() / "portfolio.json")
+    return str(_user_file_with_legacy_seed("portfolio.json"))
 
 
 def file_adjustments() -> str:
-    ensure_data_dir()
-    return str(data_dir() / "adjustments.json")
+    return str(_user_file_with_legacy_seed("adjustments.json"))
 
 
 def file_daily_ledger() -> str:
-    ensure_data_dir()
-    return str(data_dir() / "daily_ledger.json")
+    return str(_user_file_with_legacy_seed("daily_ledger.json"))
 
 
 # ---------- intraday by date ----------
 def file_intraday(date_str: str) -> str:
-    d = data_dir() / "intraday"
+    d = user_data_dir() / "intraday"
     d.mkdir(parents=True, exist_ok=True)
     return str(d / f"{date_str}.json")
 
 
 def file_intraday_fund(date_str: str, code: str) -> str:
-    d = data_dir() / "intraday" / date_str
+    d = user_data_dir() / "intraday" / date_str
     d.mkdir(parents=True, exist_ok=True)
     return str(d / f"{code}.json")
 
@@ -144,6 +211,12 @@ def file_fund_holdings_map() -> str:
 def file_stock_quote_map() -> str:
     ensure_data_dir()
     return str(data_dir() / "stock_quote_map.json")
+
+
+def file_auth_users() -> str:
+    d = data_dir() / "auth"
+    d.mkdir(parents=True, exist_ok=True)
+    return str(d / "users.json")
 
 
 def status_dir() -> Path:
