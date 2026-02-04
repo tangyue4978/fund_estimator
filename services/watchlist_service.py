@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List
 
+from services import supabase_client
 from storage import paths
 from storage.json_store import ensure_json_file, update_json
 
@@ -20,7 +21,38 @@ def _load() -> dict:
     return data
 
 
+def _current_user_id() -> str:
+    return paths.current_user_id()
+
+
+def _load_remote_items() -> List[str]:
+    uid = _current_user_id()
+    rows = supabase_client.get_rows(
+        "app_watchlist",
+        params={
+            "user_id": f"eq.{uid}",
+            "select": "code",
+            "order": "id.asc",
+        },
+    )
+    out: List[str] = []
+    seen = set()
+    for row in rows:
+        code = str(row.get("code", "")).strip() if isinstance(row, dict) else ""
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+    return out
+
+
 def watchlist_list() -> List[str]:
+    if supabase_client.is_enabled():
+        try:
+            return _load_remote_items()
+        except Exception:
+            pass
+
     data = _load()
     items = data.get("items", [])
     # 统一为字符串、去空、去重（保持原顺序）
@@ -39,6 +71,27 @@ def watchlist_add(code: str) -> dict:
     code = (code or "").strip()
     if not code:
         return _load()
+
+    if supabase_client.is_enabled():
+        try:
+            uid = _current_user_id()
+            # avoid duplicate insert conflict in normal path
+            exists = supabase_client.get_rows(
+                "app_watchlist",
+                params={
+                    "user_id": f"eq.{uid}",
+                    "code": f"eq.{code}",
+                    "select": "id",
+                    "limit": "1",
+                },
+            )
+            if not exists:
+                resp = supabase_client.insert_row("app_watchlist", {"user_id": uid, "code": code})
+                if resp.status_code not in (200, 201, 409):
+                    raise RuntimeError(f"watchlist add failed({resp.status_code})")
+            return {"items": _load_remote_items(), "updated_at": _now_iso()}
+        except Exception:
+            pass
 
     p = paths.file_watchlist()
 
@@ -60,6 +113,22 @@ def watchlist_remove(code: str) -> dict:
     code = (code or "").strip()
     if not code:
         return _load()
+
+    if supabase_client.is_enabled():
+        try:
+            uid = _current_user_id()
+            resp = supabase_client.delete_rows(
+                "app_watchlist",
+                params={
+                    "user_id": f"eq.{uid}",
+                    "code": f"eq.{code}",
+                },
+            )
+            if resp.status_code not in (200, 204):
+                raise RuntimeError(f"watchlist remove failed({resp.status_code})")
+            return {"items": _load_remote_items(), "updated_at": _now_iso()}
+        except Exception:
+            pass
 
     p = paths.file_watchlist()
 
