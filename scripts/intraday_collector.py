@@ -7,14 +7,20 @@ from datetime import datetime, date
 from typing import List, Dict, Optional
 import json
 from pathlib import Path
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
 
 
 def _now() -> datetime:
-    return datetime.now()
+    if ZoneInfo is None:
+        return datetime.now()
+    return datetime.now(ZoneInfo("Asia/Shanghai"))
 
 
 def _today_str() -> str:
-    return date.today().isoformat()
+    return _now().date().isoformat()
 
 
 def _is_weekday(dt: datetime) -> bool:
@@ -46,6 +52,10 @@ def _is_close_window(dt: datetime, minutes: int = 2) -> bool:
     return abs(hm - close_hm) <= minutes
 
 
+def _minutes_of_day(dt: datetime) -> int:
+    return dt.hour * 60 + dt.minute
+
+
 from storage import paths
 paths.ensure_dirs()
 _LOG_PATH = paths.file_collector_log()
@@ -53,7 +63,7 @@ _STATUS_PATH = paths.file_collector_status()
 
 
 def _print(msg: str) -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = _now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[collector] {ts} {msg}"
     print(line, flush=True)
 
@@ -72,7 +82,7 @@ def _write_status(payload: dict) -> None:
     try:
         _STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
         payload = dict(payload)
-        payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        payload["updated_at"] = _now().isoformat(timespec="seconds")
         _STATUS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
@@ -81,11 +91,15 @@ def _write_status(payload: dict) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Fund intraday collector (background).")
-    parser.add_argument("--interval", type=int, default=10, help="采样间隔秒（默认10）")
-    parser.add_argument("--only-trading", action="store_true", help="仅交易时段采样")
-    parser.add_argument("--close-window-min", type=int, default=2, help="收盘窗口分钟（默认2）")
-    parser.add_argument("--once", action="store_true", help="只跑一轮就退出（调试用）")
-    parser.add_argument("--codes", type=str, default="", help="指定代码（逗号分隔），不填则用 watchlist")
+    parser.add_argument("--interval", type=int, default=10, help="sampling interval in seconds")
+    parser.add_argument("--only-trading", action="store_true", help="sample only during trading session")
+    parser.add_argument("--close-window-min", type=int, default=2, help="close marker window in minutes")
+    parser.add_argument("--settle-hour", type=int, default=20, help="daily auto-settle start hour (0-23)")
+    parser.add_argument("--settle-deadline-hour", type=int, default=24, help="daily auto-settle deadline hour (1-24)")
+    parser.add_argument("--settle-retry-min", type=int, default=30, help="retry interval in minutes when settle gets 0 rows")
+    parser.add_argument("--settle-days-back", type=int, default=7, help="days_back for settle_pending_days")
+    parser.add_argument("--once", action="store_true", help="run once and exit")
+    parser.add_argument("--codes", type=str, default="", help="comma-separated codes; empty means watchlist")
     args = parser.parse_args(argv)
 
     # 延迟 import（避免脚本启动时因依赖加载失败导致无提示退出）
@@ -93,18 +107,83 @@ def main(argv: Optional[List[str]] = None) -> int:
         from services.watchlist_service import watchlist_list
         from services.estimation_service import estimate_many
         from services.intraday_service import record_intraday_point, intraday_append_close_marker
+        from services.settlement_service import count_pending_settlement, settle_pending_days
     except Exception as e:
         _print(f"IMPORT ERROR: {e}")
         return 2
 
     interval = max(3, int(args.interval))
     only_trading = bool(args.only_trading)
+    settle_hour = max(0, min(23, int(args.settle_hour)))
+    settle_deadline_hour = max(settle_hour + 1, min(24, int(args.settle_deadline_hour)))
+    settle_start_min = settle_hour * 60
+    settle_deadline_min = settle_deadline_hour * 60
+    settle_retry_sec = max(60, int(args.settle_retry_min) * 60)
+    settle_days_back = max(1, int(args.settle_days_back))
+    last_settle_try_ts = 0.0
+    last_settle_try_date = ""
+    settle_done_today = False
 
-    _print(f"started. interval={interval}s only_trading={only_trading} close_window_min={args.close_window_min}")
+    _print(
+        "started. "
+        f"interval={interval}s only_trading={only_trading} close_window_min={args.close_window_min} "
+        f"settle_hour={settle_hour} settle_deadline_hour={settle_deadline_hour} "
+        f"settle_retry_min={int(settle_retry_sec/60)} settle_days_back={settle_days_back}"
+    )
 
     while True:
         dt = _now()
         ds = _today_str()
+        now_ts = time.time()
+
+        if ds != last_settle_try_date:
+            settle_done_today = False
+
+        # Evening auto settle:
+        # - first attempt every day after settle_hour
+        # - retry every settle_retry_min until pending becomes 0 or deadline arrives
+        minutes_now = _minutes_of_day(dt)
+        in_settle_window = settle_start_min <= minutes_now < settle_deadline_min
+        can_try_settle = in_settle_window and (not settle_done_today)
+        first_try_today = (last_settle_try_date != ds)
+        retry_due = (now_ts - last_settle_try_ts) >= settle_retry_sec
+        if can_try_settle and (first_try_today or retry_due):
+            try:
+                _, settled_total = settle_pending_days(settle_days_back)
+                pending_count = count_pending_settlement(settle_days_back)
+                last_settle_try_ts = now_ts
+                last_settle_try_date = ds
+                if pending_count <= 0:
+                    settle_done_today = True
+                    _print(
+                        f"auto settle done: +{settled_total} rows, pending={pending_count} "
+                        f"(days_back={settle_days_back})"
+                    )
+                else:
+                    _print(
+                        f"auto settle pending={pending_count}, settled_this_round={settled_total}, "
+                        f"will retry in {int(settle_retry_sec/60)} min"
+                    )
+                _write_status({
+                    "running": True,
+                    "date": ds,
+                    "phase": "auto_settle",
+                    "settled_total": int(settled_total),
+                    "pending_count": int(pending_count),
+                    "settle_hour": settle_hour,
+                    "settle_deadline_hour": settle_deadline_hour,
+                    "settle_retry_min": int(settle_retry_sec / 60),
+                })
+            except Exception as e:
+                last_settle_try_ts = now_ts
+                last_settle_try_date = ds
+                _print(f"auto settle error: {e}")
+                _write_status({
+                    "running": True,
+                    "date": ds,
+                    "phase": "error",
+                    "last_error": f"auto_settle: {e}",
+                })
 
         _write_status({
             "running": True,

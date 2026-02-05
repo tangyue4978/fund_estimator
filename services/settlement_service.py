@@ -307,3 +307,27 @@ def settle_pending_days(max_days_back: int = 7) -> Tuple[dict, int]:
         total += cnt
 
     return _load_ledger(), total
+
+
+def count_pending_settlement(max_days_back: int = 7) -> int:
+    """
+    Count estimated_only ledger rows in recent N days.
+    Used by scheduler to decide whether retries can stop for tonight.
+    """
+    days_back = max(1, int(max_days_back))
+    cutoff = (date.today() - timedelta(days=days_back - 1)).isoformat()
+    ledger = _load_ledger()
+    items = ledger.get("items", [])
+    if not isinstance(items, list):
+        return 0
+
+    pending = 0
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        d = str(it.get("date", ""))
+        if (not d) or d < cutoff:
+            continue
+        if str(it.get("settle_status", "")) == constants.SETTLE_ESTIMATED_ONLY:
+            pending += 1
+    return pending
