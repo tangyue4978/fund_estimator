@@ -60,16 +60,6 @@ def _is_logged_in() -> bool:
         st.session_state["fund_estimator_user_id"] = uid
         return True
 
-    # Cross-page fallback: recover from process-level active user/env.
-    uid_env = str(paths.current_user_id() or "").strip()
-    if uid_env and uid_env != "public":
-        st.session_state["auth_logged_in"] = True
-        st.session_state["auth_user_id"] = uid_env
-        st.session_state["fund_estimator_user_id"] = uid_env
-        if "auth_phone" not in st.session_state:
-            st.session_state["auth_phone"] = ""
-        return True
-
     # Hard refresh can lose session_state. Restore from query params when present.
     uid_q, phone_q = _read_auth_from_query()
     if uid_q:
