@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
 
 from config import constants
 from datasources.nav_api import fetch_official_nav_for_date
@@ -15,7 +19,15 @@ from services.snapshot_service import build_positions_as_of
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    if ZoneInfo is None:
+        return datetime.now().isoformat(timespec="seconds")
+    return datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+
+
+def _today_str() -> str:
+    if ZoneInfo is None:
+        return date.today().isoformat()
+    return datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
 
 
 def _load_ledger() -> dict:
@@ -53,7 +65,7 @@ def _find_item_index(items: list, date_str: str, code: str) -> Optional[int]:
 
 
 def finalize_estimated_close(date_str: Optional[str] = None) -> dict:
-    d = date_str or date.today().isoformat()
+    d = date_str or _today_str()
 
     snapshots = build_positions_as_of(d)
     codes = [s.code for s in snapshots]
@@ -301,8 +313,9 @@ def settle_pending_days(max_days_back: int = 7) -> Tuple[dict, int]:
         return ledger, 0
 
     total = 0
+    today = datetime.fromisoformat(_today_str()).date()
     for i in range(max_days_back):
-        d = (date.today() - timedelta(days=i)).isoformat()
+        d = (today - timedelta(days=i)).isoformat()
         _, cnt = settle_day(d)
         total += cnt
 
@@ -315,7 +328,8 @@ def count_pending_settlement(max_days_back: int = 7) -> int:
     Used by scheduler to decide whether retries can stop for tonight.
     """
     days_back = max(1, int(max_days_back))
-    cutoff = (date.today() - timedelta(days=days_back - 1)).isoformat()
+    today = datetime.fromisoformat(_today_str()).date()
+    cutoff = (today - timedelta(days=days_back - 1)).isoformat()
     ledger = _load_ledger()
     items = ledger.get("items", [])
     if not isinstance(items, list):
