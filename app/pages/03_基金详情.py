@@ -35,8 +35,8 @@ st.set_page_config(page_title="Fund Detail", layout="wide")
 require_login()
 
 # auto refresh
-AUTO_REFRESH_SEC = 10
-_refresh_sec = st.sidebar.number_input("Auto refresh (sec)", min_value=5, max_value=120, value=AUTO_REFRESH_SEC, step=5)
+AUTO_REFRESH_SEC = 30
+_refresh_sec = st.sidebar.number_input("Auto refresh (sec)", min_value=30, max_value=120, value=AUTO_REFRESH_SEC, step=5)
 _auto_on = st.sidebar.checkbox("Enable auto refresh", value=True)
 if _auto_on:
     if st_autorefresh is not None:
@@ -158,7 +158,7 @@ def render():
         last_map = st.session_state["detail_last_sample_ts"]
         now_dt = datetime.now(ZoneInfo("Asia/Shanghai")) if ZoneInfo else datetime.now()
         last_ts = float(last_map.get(code, 0.0) or 0.0)
-        if (now_dt.timestamp() - last_ts) >= 20:
+        if (now_dt.timestamp() - last_ts) >= 30:
             record_intraday_point(target=code, estimate=est, date_str=now_dt.date().isoformat())
             last_map[code] = now_dt.timestamp()
             st.session_state["detail_last_sample_ts"] = last_map

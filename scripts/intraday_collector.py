@@ -91,7 +91,7 @@ def _write_status(payload: dict) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Fund intraday collector (background).")
-    parser.add_argument("--interval", type=int, default=10, help="sampling interval in seconds")
+    parser.add_argument("--interval", type=int, default=30, help="sampling interval in seconds")
     parser.add_argument("--only-trading", action="store_true", help="sample only during trading session")
     parser.add_argument("--close-window-min", type=int, default=2, help="close marker window in minutes")
     parser.add_argument("--settle-hour", type=int, default=20, help="daily auto-settle start hour (0-23)")
@@ -112,7 +112,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         _print(f"IMPORT ERROR: {e}")
         return 2
 
-    interval = max(3, int(args.interval))
+    interval = max(30, int(args.interval))
     only_trading = bool(args.only_trading)
     settle_hour = max(0, min(23, int(args.settle_hour)))
     settle_deadline_hour = max(settle_hour + 1, min(24, int(args.settle_deadline_hour)))

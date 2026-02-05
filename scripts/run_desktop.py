@@ -116,7 +116,7 @@ def _acquire_lock_with_recovery(lock_path: Path) -> bool:
 
 
 def _spawn_collector_dev(root: Path) -> None:
-    cmd = [sys.executable, "-m", "scripts.intraday_collector", "--interval", "10", "--only-trading"]
+    cmd = [sys.executable, "-m", "scripts.intraday_collector", "--interval", "30", "--only-trading"]
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     subprocess.Popen(cmd, cwd=str(root), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
 
@@ -125,7 +125,7 @@ def _run_collector_inproc() -> None:
     try:
         from scripts.intraday_collector import main as collector_main
 
-        collector_main(["--interval", "10", "--only-trading"])
+        collector_main(["--interval", "30", "--only-trading"])
     except Exception:
         pass
 

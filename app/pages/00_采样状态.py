@@ -77,6 +77,13 @@ def parse_last_heartbeat(lines):
             continue
     return None
 
+def age_seconds(ts: datetime | None) -> float | None:
+    if not ts:
+        return None
+    now = datetime.now(ts.tzinfo) if ts.tzinfo else datetime.now()
+    return (now - ts).total_seconds()
+
+
 
 status = read_status(STATUS_PATH)
 lines = read_last_lines(LOG_PATH, n=120)
@@ -106,7 +113,7 @@ col2.metric("collector.log 是否存在", "✅" if LOG_PATH.exists() else "❌")
 col3.metric("当前 phase", str(phase) if phase else "-")
 
 if last_ts:
-    delta = (datetime.now() - last_ts).total_seconds()
+    delta = age_seconds(last_ts) or 0.0
     col4.metric("距最近心跳", f"{int(delta)} 秒")
 else:
     col4.metric("距最近心跳", "-")
@@ -118,7 +125,7 @@ elif phase == "outside_trading":
     st.info("当前不在交易时段，采集器处于等待状态（正常）。")
 
 if last_ts:
-    delta = (datetime.now() - last_ts).total_seconds()
+    delta = age_seconds(last_ts) or 0.0
     if delta <= 60:
         st.success("采集器运行正常 ✅（最近 60 秒内有心跳）")
     elif delta <= 300:

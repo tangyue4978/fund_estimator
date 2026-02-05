@@ -36,8 +36,8 @@ st.set_page_config(page_title="Fund Estimator", layout="wide")
 require_login()
 
 # auto refresh (Home)
-HOME_AUTO_REFRESH_SEC = 10
-_home_refresh_sec = st.sidebar.number_input("Home auto refresh (sec)", min_value=5, max_value=120, value=HOME_AUTO_REFRESH_SEC, step=5)
+HOME_AUTO_REFRESH_SEC = 30
+_home_refresh_sec = st.sidebar.number_input("Home auto refresh (sec)", min_value=30, max_value=120, value=HOME_AUTO_REFRESH_SEC, step=5)
 _home_auto_on = st.sidebar.checkbox("Enable home auto refresh", value=True)
 if _home_auto_on:
     if st_autorefresh is not None:
@@ -158,7 +158,7 @@ def _start_collector(interval_sec: int, only_trading: bool) -> tuple[bool, str]:
         "-m",
         "scripts.intraday_collector",
         "--interval",
-        str(max(3, int(interval_sec))),
+        str(max(30, int(interval_sec))),
     ]
     if only_trading:
         cmd.append("--only-trading")
@@ -212,7 +212,7 @@ def render_watchlist():
 
     st.sidebar.header("盘中采样")
     only_trading = st.sidebar.checkbox("仅交易时段采样", value=True)
-    interval = st.sidebar.number_input("采样间隔（秒）", min_value=5, max_value=120, value=10, step=5)
+    interval = st.sidebar.number_input("采样间隔（秒）", min_value=30, max_value=120, value=30, step=5)
 
     col_s1, col_s2 = st.sidebar.columns(2)
     running = _collector_running()
@@ -269,7 +269,7 @@ def render_watchlist():
     _now = _now_cn()
     _ds = _now.date().isoformat()
     _last_ts = float(_last_map.get("_all", 0.0) or 0.0)
-    if (_now.timestamp() - _last_ts) >= max(5, int(_home_refresh_sec)):
+    if (_now.timestamp() - _last_ts) >= max(30, int(_home_refresh_sec)):
         for _c, _est in est_map.items():
             if _est:
                 record_intraday_point(target=_c, estimate=_est, date_str=_ds)
