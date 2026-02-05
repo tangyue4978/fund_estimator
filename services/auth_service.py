@@ -27,8 +27,8 @@ def _normalize_phone(phone: str) -> str:
 
 
 def _validate_phone(phone: str) -> bool:
-    # Keep it simple: digits only, 6-20 chars.
-    return bool(re.fullmatch(r"\d{6,20}", phone or ""))
+    # Simple mainland mobile format: 11 digits, starts with 1, second digit 3-9.
+    return bool(re.fullmatch(r"1[3-9]\d{9}", phone or ""))
 
 
 def _validate_password(password: str) -> bool:
@@ -72,7 +72,7 @@ def _to_user_id(phone: str) -> str:
 def register_user(phone: str, password: str) -> Tuple[bool, str, str | None]:
     norm_phone = _normalize_phone(phone)
     if not _validate_phone(norm_phone):
-        return False, "手机号格式不正确（仅数字，长度6-20）", None
+        return False, "手机号格式不正确（仅数字，11位）", None
     if not _validate_password(password):
         return False, "密码至少6位", None
 
