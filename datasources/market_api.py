@@ -98,7 +98,7 @@ def _fetch_tencent_quotes(codes: List[str]) -> Dict[str, StockQuote]:
     if not query_codes:
         return {}
 
-    url = f"http://qt.gtimg.cn/q={','.join(query_codes)}"
+    url = f"https://qt.gtimg.cn/q={','.join(query_codes)}"
     resp = get_text(cache_key=f"tencent_quote_{len(query_codes)}", url=url, ttl_sec=6, timeout_sec=4)
     if not resp.ok or not resp.text:
         return {}

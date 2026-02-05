@@ -27,12 +27,12 @@ _JSONPGZ_RE = re.compile(r"jsonpgz\((\{.*\})\)\s*;?\s*$", re.S)
 def _headers() -> dict:
     return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) fund_estimator/0.1",
-        "Referer": "http://fund.eastmoney.com/",
+        "Referer": "https://fund.eastmoney.com/",
     }
 
 
 def _fetch_gsz_one_real(code: str) -> Optional[GszQuote]:
-    url = f"http://fundgz.1234567.com.cn/js/{code}.js"
+    url = f"https://fundgz.1234567.com.cn/js/{code}.js"
     params = {"rt": int(datetime.now().timestamp() * 1000)}
 
     resp = get_text(

@@ -23,12 +23,12 @@ _NETWORTH_RE = re.compile(r"Data_netWorthTrend\s*=\s*(\[[\s\S]*?\])\s*;", re.M)
 def _headers() -> dict:
     return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) fund_estimator/0.1",
-        "Referer": "http://fund.eastmoney.com/",
+        "Referer": "https://fund.eastmoney.com/",
     }
 
 
 def _fetch_pingzhongdata_js(code: str) -> str:
-    url = f"http://fund.eastmoney.com/pingzhongdata/{code}.js"
+    url = f"https://fund.eastmoney.com/pingzhongdata/{code}.js"
     params = {"v": datetime.now().strftime("%Y%m%d%H%M%S")}
 
     resp = get_text(
