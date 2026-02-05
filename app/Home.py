@@ -16,10 +16,6 @@ import os
 import signal
 import subprocess
 from datetime import datetime, time as dtime
-try:
-    from zoneinfo import ZoneInfo
-except Exception:  # pragma: no cover - fallback for environments without zoneinfo
-    ZoneInfo = None
 
 import streamlit as st
 try:
@@ -30,6 +26,7 @@ except Exception:  # pragma: no cover
 from services.watchlist_service import watchlist_list, watchlist_add, watchlist_remove
 from services.estimation_service import estimate_many
 from services.intraday_service import record_intraday_point
+from services.trading_time import now_cn, is_cn_trading_time
 
 
 st.set_page_config(page_title="Fund Estimator", layout="wide")
@@ -45,25 +42,6 @@ if _home_auto_on:
     elif hasattr(st, "autorefresh"):
         st.autorefresh(interval=int(_home_refresh_sec) * 1000, key="home_autorefresh")
 
-
-
-def _now_cn() -> datetime:
-    if ZoneInfo is None:
-        return datetime.now()
-    return datetime.now(ZoneInfo("Asia/Shanghai"))
-
-
-def _is_cn_trading_time(now: datetime) -> bool:
-    """
-    A股交易时段（按本机时区即可：新加坡=上海都是UTC+8）
-    周一~周五：
-      09:30-11:30
-      13:00-15:00
-    """
-    if now.weekday() >= 5:  # 5=Sat,6=Sun
-        return False
-    t = now.time()
-    return (dtime(9, 30) <= t <= dtime(11, 30)) or (dtime(13, 0) <= t <= dtime(15, 0))
 
 
 def _is_close_window(now: datetime) -> bool:
@@ -217,6 +195,7 @@ def render_watchlist():
     col_s1, col_s2 = st.sidebar.columns(2)
     running = _collector_running()
 
+
     with col_s1:
         if st.button("启动采样", width="stretch"):
             ok, msg = _start_collector(int(interval), bool(only_trading))
@@ -262,14 +241,15 @@ def render_watchlist():
 
     est_map = estimate_many(codes)
 
-    # lightweight sampling on Home rerun (persists to intraday)
+    # Silent page-side sampling write: write after fetch, no toast/rerun.
     if "home_last_sample_ts" not in st.session_state:
         st.session_state["home_last_sample_ts"] = {}
     _last_map = st.session_state["home_last_sample_ts"]
-    _now = _now_cn()
-    _ds = _now.date().isoformat()
+    _now = now_cn()
     _last_ts = float(_last_map.get("_all", 0.0) or 0.0)
-    if (_now.timestamp() - _last_ts) >= max(30, int(_home_refresh_sec)):
+    _can_sample = (not bool(only_trading)) or is_cn_trading_time(_now)
+    if (not running) and _can_sample and (_now.timestamp() - _last_ts) >= max(30, int(interval)):
+        _ds = _now.date().isoformat()
         for _c, _est in est_map.items():
             if _est:
                 record_intraday_point(target=_c, estimate=_est, date_str=_ds)

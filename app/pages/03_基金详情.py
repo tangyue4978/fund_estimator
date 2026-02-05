@@ -1,4 +1,6 @@
 import sys
+import os
+import subprocess
 from pathlib import Path
 
 import pandas as pd
@@ -15,14 +17,11 @@ try:
 except Exception:  # pragma: no cover
     st_autorefresh = None
 from datetime import date, datetime, timedelta
-try:
-    from zoneinfo import ZoneInfo
-except Exception:  # pragma: no cover
-    ZoneInfo = None
 
 from services.watchlist_service import watchlist_list
 from services.estimation_service import estimate_one
 from services.intraday_service import intraday_load_fund_series, record_intraday_point
+from services.trading_time import now_cn, is_cn_trading_time
 from services.history_service import fund_history
 from storage.json_store import load_json
 from storage import paths
@@ -123,6 +122,43 @@ def _filter_trading_session(points: list) -> list:
             out.append(it)
     return out
 
+
+def _collector_running() -> bool:
+    try:
+        if hasattr(paths, "status_dir"):
+            p = Path(paths.status_dir()) / "collector.pid"
+        elif hasattr(paths, "runtime_root"):
+            p = Path(paths.runtime_root()) / "status" / "collector.pid"
+        else:
+            p = PROJECT_ROOT / "storage" / "status" / "collector.pid"
+        raw = p.read_text(encoding="utf-8").strip()
+        pid = int(raw) if raw else 0
+    except Exception:
+        return False
+
+    if pid <= 0:
+        return False
+
+    if os.name == "nt":
+        try:
+            proc = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+            out = (proc.stdout or "").strip()
+            return bool(out) and (not out.upper().startswith("INFO:")) and (f'"{pid}"' in out)
+        except Exception:
+            return False
+
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
 def _read_ledger_status(code: str, date_str: str) -> dict:
     data = load_json(paths.file_daily_ledger(), fallback={"items": []})
     items = data.get("items", [])
@@ -157,17 +193,17 @@ def render():
     if est and est.warning:
         st.warning(est.warning)
 
-    # --- lightweight sampling on detail page ---
+    # Silent page-side sampling write: write after fetch, no toast/rerun.
     if est:
         if "detail_last_sample_ts" not in st.session_state:
             st.session_state["detail_last_sample_ts"] = {}
-        last_map = st.session_state["detail_last_sample_ts"]
-        now_dt = datetime.now(ZoneInfo("Asia/Shanghai")) if ZoneInfo else datetime.now()
-        last_ts = float(last_map.get(code, 0.0) or 0.0)
-        if (now_dt.timestamp() - last_ts) >= 30:
-            record_intraday_point(target=code, estimate=est, date_str=now_dt.date().isoformat())
-            last_map[code] = now_dt.timestamp()
-            st.session_state["detail_last_sample_ts"] = last_map
+        _last_map = st.session_state["detail_last_sample_ts"]
+        _now = now_cn()
+        _last_ts = float(_last_map.get(code, 0.0) or 0.0)
+        if (not _collector_running()) and is_cn_trading_time(_now) and ((_now.timestamp() - _last_ts) >= max(30, int(_refresh_sec))):
+            record_intraday_point(target=code, estimate=est, date_str=_now.date().isoformat())
+            _last_map[code] = _now.timestamp()
+            st.session_state["detail_last_sample_ts"] = _last_map
 
     st.divider()
 
