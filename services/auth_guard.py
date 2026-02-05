@@ -56,6 +56,8 @@ def _is_logged_in() -> bool:
     logged = bool(st.session_state.get("auth_logged_in"))
     uid = str(st.session_state.get("auth_user_id", "")).strip()
     if logged and uid:
+        # Keep auth marker in URL on every run so hard refresh can recover session.
+        _write_auth_to_query(str(st.session_state.get("auth_phone", "")), uid)
         paths.set_active_user(uid)
         st.session_state["fund_estimator_user_id"] = uid
         return True
