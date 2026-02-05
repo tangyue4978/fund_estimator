@@ -22,8 +22,10 @@ def _looks_like_ui_edit(item: dict) -> bool:
         return False
     return (
         "[ui_edit]" in note
-        or note.startswith("ui编辑".lower())
         or note.startswith("edit->")
+        or note.startswith("ui_edit")
+        or note.startswith("ui edit")
+        or (note.startswith("ui") and ("edit" in note or "\u7f16\u8f91" in note))
     )
 
 
@@ -350,9 +352,29 @@ def remove_adjustments_by_code_date(code: str, effective_date: str, source: Opti
                 # Backward-compatible fallback when source column doesn't exist.
                 query_params.pop("source", None)
                 if source == "ui_edit":
-                    query_params["note"] = "like.*[ui_edit]*"
-                rows = supabase_client.get_rows("app_adjustments", params={**query_params, "select": "id"})
-                resp = supabase_client.delete_rows("app_adjustments", query_params)
+                    rows = []
+                    ok = True
+                    for note_pattern in ("like.*[ui_edit]*", "like.UI\u7f16\u8f91*", "like.edit->*"):
+                        qp = dict(query_params)
+                        qp["note"] = note_pattern
+                        cur_rows = supabase_client.get_rows("app_adjustments", params={**qp, "select": "id"})
+                        if isinstance(cur_rows, list):
+                            rows.extend(cur_rows)
+                        cur_resp = supabase_client.delete_rows("app_adjustments", qp)
+                        if cur_resp.status_code not in (200, 204):
+                            ok = False
+                    if not ok:
+                        raise RuntimeError("remove by code+date fallback delete failed")
+                    # de-duplicate ids gathered from multiple note filters
+                    uniq = {}
+                    for r in rows:
+                        if isinstance(r, dict) and r.get("id") is not None:
+                            uniq[str(r.get("id"))] = r
+                    rows = list(uniq.values())
+                    resp = type("Resp", (), {"status_code": 200})()
+                else:
+                    rows = supabase_client.get_rows("app_adjustments", params={**query_params, "select": "id"})
+                    resp = supabase_client.delete_rows("app_adjustments", query_params)
             if resp.status_code not in (200, 204):
                 raise RuntimeError(f"remove by code+date failed({resp.status_code})")
             return len(rows)
