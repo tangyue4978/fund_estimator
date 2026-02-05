@@ -11,7 +11,6 @@ from pathlib import Path
 APP_NAME = "FundEstimator"
 _USER_ID_ENV = "FUND_ESTIMATOR_USER_ID"
 _DEFAULT_USER_ID = "public"
-_active_user_id: str | None = None
 _SEEDED_FILES = (
     "fund_cache.json",
     "fund_profile_map.json",
@@ -68,17 +67,28 @@ def _sanitize_user_id(user_id: str | None) -> str:
 
 
 def set_active_user(user_id: str | None) -> str:
-    global _active_user_id
     uid = _sanitize_user_id(user_id)
-    _active_user_id = uid
+    # Keep user context in current Streamlit session only.
+    # Do not write process-global state (env/global variable), which can leak across sessions.
+    try:
+        if "streamlit" in sys.modules:
+            from streamlit.runtime.scriptrunner import get_script_run_ctx  # type: ignore
+
+            if get_script_run_ctx() is not None:
+                import streamlit as st  # type: ignore
+
+                st.session_state["fund_estimator_user_id"] = uid
+                return uid
+    except Exception:
+        pass
+
+    # Non-Streamlit scripts can still opt in via environment variable.
     os.environ[_USER_ID_ENV] = uid
     return uid
 
 
 def current_user_id() -> str:
-    global _active_user_id
-
-    # Optional Streamlit context read; only when running inside a Streamlit script context.
+    # Streamlit runtime: strictly read from current session.
     try:
         if "streamlit" in sys.modules:
             from streamlit.runtime.scriptrunner import get_script_run_ctx  # type: ignore
@@ -89,19 +99,15 @@ def current_user_id() -> str:
                 session_uid = st.session_state.get("fund_estimator_user_id", "")
                 if session_uid:
                     return _sanitize_user_id(str(session_uid))
+                return _DEFAULT_USER_ID
     except Exception:
         pass
 
-    if _active_user_id:
-        return _active_user_id
-
+    # Non-Streamlit runtime fallback (CLI scripts/tests).
     env_uid = os.getenv(_USER_ID_ENV, "").strip()
     if env_uid:
-        _active_user_id = _sanitize_user_id(env_uid)
-        return _active_user_id
-
-    _active_user_id = _DEFAULT_USER_ID
-    return _active_user_id
+        return _sanitize_user_id(env_uid)
+    return _DEFAULT_USER_ID
 
 
 def project_root() -> Path:
