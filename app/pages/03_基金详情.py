@@ -61,7 +61,7 @@ def _pick_code_from_query_or_select() -> str:
 
     code = (code or "").strip()
     wl = watchlist_list()
-    options = wl if wl else ["510300"]
+    options = list(wl)
 
     if code and code not in options:
         options = [code] + options
@@ -75,6 +75,9 @@ def _pick_code_from_query_or_select() -> str:
         if not n:
             n = f"\u57fa\u91d1{c}"
         return f"{c} - {n}"
+
+    if not options:
+        return st.text_input("基金代码", value="", placeholder="例如：510300 / 000001").strip()
 
     return st.selectbox("基金代码", options=options, index=0 if not code else options.index(code), format_func=_fmt_option)
 
@@ -133,6 +136,9 @@ def render():
     st.title("基金详情")
 
     code = _pick_code_from_query_or_select()
+    if not code:
+        st.info("请先输入基金代码或在自选中添加基金。")
+        return
 
     # --- top: realtime quote ---
     est = estimate_one(code)

@@ -360,7 +360,7 @@ def render_portfolio():
 
     # code input: watchlist or manual
     wl_codes = watchlist_list()
-    code_opts = sorted(set(snap_map.keys()) | set(wl_codes) | set(["510300"]))
+    code_opts = sorted(set(snap_map.keys()) | set(wl_codes))
 
     def _fmt_code(c: str) -> str:
         try:
@@ -375,10 +375,17 @@ def render_portfolio():
     mode = st.radio("\u57fa\u91d1\u4ee3\u7801\u8f93\u5165", ["\u4ece\u81ea\u9009\u4e2d\u9009\u62e9", "\u624b\u52a8\u8f93\u5165"], horizontal=True)
     if mode == "\u624b\u52a8\u8f93\u5165":
         code = st.text_input("\u57fa\u91d1\u4ee3\u7801", value="", placeholder="\u4f8b\u5982\uff1a510300 / 000001").strip()
-        if not code:
+        if not code and code_opts:
             code = st.selectbox("\u5907\u9009\u5217\u8868", options=code_opts, format_func=_fmt_code)
     else:
-        code = st.selectbox("\u81ea\u9009/\u5df2\u6709\u4ee3\u7801", options=code_opts, format_func=_fmt_code)
+        if code_opts:
+            code = st.selectbox("\u81ea\u9009/\u5df2\u6709\u4ee3\u7801", options=code_opts, format_func=_fmt_code)
+        else:
+            code = st.text_input("\u57fa\u91d1\u4ee3\u7801", value="", placeholder="\u4f8b\u5982\uff1a510300 / 000001").strip()
+
+    if not code:
+        st.info("\u8bf7\u5148\u8f93\u5165\u57fa\u91d1\u4ee3\u7801\u6216\u5728\u81ea\u9009\u4e2d\u6dfb\u52a0\u57fa\u91d1\u3002")
+        return
 
     cur = snap_map.get(code)
     cur_shares = float(cur.shares_end) if cur else 0.0
