@@ -18,7 +18,7 @@ def _load_ledger_items() -> List[dict]:
                     "user_id": f"eq.{paths.current_user_id()}",
                     "select": (
                         "date,code,shares_end,avg_cost_nav_end,realized_pnl_end,"
-                        "estimated_nav_close,official_nav,settle_status"
+                        "estimated_nav_close,estimated_pnl_close,official_nav,official_pnl,settle_status"
                     ),
                     "order": "date.asc,code.asc",
                 },
@@ -32,6 +32,40 @@ def _load_ledger_items() -> List[dict]:
     data = res.data if isinstance(res.data, dict) else {}
     items = data.get("items", [])
     return items if isinstance(items, list) else []
+
+
+def get_fund_cumulative_pnl_on(code: str, date_str: str) -> Optional[float]:
+    """
+    Get a fund's cumulative pnl on a specific date from daily ledger.
+    Prefer settled official_pnl, fallback to estimated_pnl_close.
+    """
+    code = (code or "").strip()
+    date_str = (date_str or "").strip()
+    if not code or not date_str:
+        return None
+
+    items = _load_ledger_items()
+    for it in items:
+        if str(it.get("code", "")).strip() != code:
+            continue
+        if str(it.get("date", "")).strip() != date_str:
+            continue
+
+        status = str(it.get("settle_status", "")).strip()
+        if status == constants.SETTLE_SETTLED and it.get("official_pnl") is not None:
+            try:
+                return float(it.get("official_pnl"))
+            except Exception:
+                pass
+
+        if it.get("estimated_pnl_close") is not None:
+            try:
+                return float(it.get("estimated_pnl_close"))
+            except Exception:
+                pass
+
+        return None
+    return None
 
 
 def get_history(code: str, days: int = 90) -> List[dict]:

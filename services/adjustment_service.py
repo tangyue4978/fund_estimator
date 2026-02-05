@@ -13,17 +13,123 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def list_adjustments(code: Optional[str] = None) -> List[dict]:
+def _looks_like_ui_edit(item: dict) -> bool:
+    src = str(item.get("source", "") or "").strip().lower()
+    if src == "ui_edit":
+        return True
+    note = str(item.get("note", "") or "").strip().lower()
+    if not note:
+        return False
+    return (
+        "[ui_edit]" in note
+        or note.startswith("ui编辑".lower())
+        or note.startswith("edit->")
+    )
+
+
+def migrate_ui_edit_source(code: Optional[str] = None, effective_date: Optional[str] = None) -> int:
+    """
+    Backfill historical ui_edit records whose source is empty/manual.
+    Heuristic is based on note markers to avoid touching manual flows.
+    """
+    code = (code or "").strip()
+    effective_date = (effective_date or "").strip()
+
     if supabase_client.is_enabled():
         try:
             params = {
                 "user_id": f"eq.{paths.current_user_id()}",
-                "select": "id,type,code,effective_date,shares,price,cash,note,created_at",
+                "order": "effective_date.asc,created_at.asc",
+                "select": "id,note,source",
+            }
+            if code:
+                params["code"] = f"eq.{code}"
+            if effective_date:
+                params["effective_date"] = f"eq.{effective_date}"
+            rows = supabase_client.get_rows("app_adjustments", params=params)
+            changed = 0
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                src = str(row.get("source", "") or "").strip().lower()
+                if src == "ui_edit":
+                    continue
+                if not _looks_like_ui_edit(row):
+                    continue
+                rid = str(row.get("id", "")).strip()
+                if not rid:
+                    continue
+                resp = supabase_client.update_rows(
+                    "app_adjustments",
+                    {"source": "ui_edit"},
+                    {"user_id": f"eq.{paths.current_user_id()}", "id": f"eq.{rid}"},
+                )
+                if resp.status_code in (200, 204):
+                    changed += 1
+            return changed
+        except Exception:
+            pass
+
+    p = paths.file_adjustments()
+    changed = {"count": 0}
+
+    def updater(data: dict):
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            items = []
+        out = []
+        cnt = 0
+        for it in items:
+            if not isinstance(it, dict):
+                out.append(it)
+                continue
+            it_code = str(it.get("code", "")).strip()
+            it_date = str(it.get("effective_date", "")).strip()
+            if code and it_code != code:
+                out.append(it)
+                continue
+            if effective_date and it_date != effective_date:
+                out.append(it)
+                continue
+            src = str(it.get("source", "") or "").strip().lower()
+            if src == "ui_edit":
+                out.append(it)
+                continue
+            if _looks_like_ui_edit(it):
+                it["source"] = "ui_edit"
+                cnt += 1
+            out.append(it)
+        changed["count"] = cnt
+        data["items"] = out
+        if cnt > 0:
+            data["updated_at"] = _now_iso()
+        return data
+
+    update_json(p, updater)
+    return changed["count"]
+
+
+def list_adjustments(code: Optional[str] = None) -> List[dict]:
+    if supabase_client.is_enabled():
+        try:
+            params_base = {
+                "user_id": f"eq.{paths.current_user_id()}",
                 "order": "effective_date.asc,created_at.asc",
             }
             if code:
-                params["code"] = f"eq.{code.strip()}"
-            rows = supabase_client.get_rows("app_adjustments", params=params)
+                params_base["code"] = f"eq.{code.strip()}"
+            # New schema includes source.
+            try:
+                rows = supabase_client.get_rows(
+                    "app_adjustments",
+                    params={**params_base, "select": "id,type,code,effective_date,shares,price,cash,note,source,created_at"},
+                )
+            except Exception:
+                # Backward-compatible fallback when source column doesn't exist.
+                rows = supabase_client.get_rows(
+                    "app_adjustments",
+                    params={**params_base, "select": "id,type,code,effective_date,shares,price,cash,note,created_at"},
+                )
             return [x for x in rows if isinstance(x, dict)]
         except Exception:
             pass
@@ -50,6 +156,7 @@ def add_adjustment(
     price: float = 0.0,
     cash: float = 0.0,
     note: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> dict:
     type = (type or "").strip().upper()
     code = (code or "").strip()
@@ -61,6 +168,9 @@ def add_adjustment(
         raise ValueError("code is required")
     if not effective_date:
         raise ValueError("effective_date is required")
+    source = (source or "manual").strip().lower()
+    if source not in ("manual", "ui_edit"):
+        raise ValueError("source must be manual/ui_edit")
 
     if type in ("BUY", "SELL"):
         if shares <= 0:
@@ -77,6 +187,7 @@ def add_adjustment(
         "price": float(price),
         "cash": float(cash),
         "note": note,
+        "source": source,
         "created_at": _now_iso(),
     }
 
@@ -85,6 +196,14 @@ def add_adjustment(
             payload = dict(item)
             payload["user_id"] = paths.current_user_id()
             resp = supabase_client.insert_row("app_adjustments", payload)
+            if resp.status_code in (400, 404):
+                # Backward-compatible fallback when source column doesn't exist.
+                payload.pop("source", None)
+                if source == "ui_edit":
+                    note_raw = str(payload.get("note") or "").strip()
+                    if not note_raw.startswith("[ui_edit]"):
+                        payload["note"] = f"[ui_edit] {note_raw}".strip()
+                resp = supabase_client.insert_row("app_adjustments", payload)
             if resp.status_code not in (200, 201):
                 raise RuntimeError(f"add adjustment failed({resp.status_code})")
             return {"items": list_adjustments(), "updated_at": _now_iso()}
@@ -191,6 +310,70 @@ def remove_adjustments_by_code(code: str) -> int:
         cnt = 0
         for it in items:
             if str(it.get("code", "")).strip() == code:
+                cnt += 1
+            else:
+                new_items.append(it)
+        removed["count"] = cnt
+        data["items"] = new_items
+        data["updated_at"] = _now_iso()
+        return data
+
+    update_json(p, updater)
+    return removed["count"]
+
+
+def remove_adjustments_by_code_date(code: str, effective_date: str, source: Optional[str] = None) -> int:
+    code = (code or "").strip()
+    effective_date = (effective_date or "").strip()
+    if not code:
+        raise ValueError("code is required")
+    if not effective_date:
+        raise ValueError("effective_date is required")
+    source = (source or "").strip().lower()
+    if source == "ui_edit":
+        # Backfill old rows first; otherwise null/manual source rows won't be cleaned.
+        migrate_ui_edit_source(code=code, effective_date=effective_date)
+
+    if supabase_client.is_enabled():
+        try:
+            uid = paths.current_user_id()
+            query_params = {
+                "user_id": f"eq.{uid}",
+                "code": f"eq.{code}",
+                "effective_date": f"eq.{effective_date}",
+            }
+            if source:
+                query_params["source"] = f"eq.{source}"
+            rows = supabase_client.get_rows("app_adjustments", params={**query_params, "select": "id"})
+            resp = supabase_client.delete_rows("app_adjustments", query_params)
+            if resp.status_code in (400, 404) and source:
+                # Backward-compatible fallback when source column doesn't exist.
+                query_params.pop("source", None)
+                if source == "ui_edit":
+                    query_params["note"] = "like.*[ui_edit]*"
+                rows = supabase_client.get_rows("app_adjustments", params={**query_params, "select": "id"})
+                resp = supabase_client.delete_rows("app_adjustments", query_params)
+            if resp.status_code not in (200, 204):
+                raise RuntimeError(f"remove by code+date failed({resp.status_code})")
+            return len(rows)
+        except Exception:
+            pass
+
+    p = paths.file_adjustments()
+    removed = {"count": 0}
+
+    def updater(data: dict):
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            items = []
+        new_items = []
+        cnt = 0
+        for it in items:
+            it_code = str(it.get("code", "")).strip()
+            it_date = str(it.get("effective_date", "")).strip()
+            it_source = str(it.get("source", "manual")).strip().lower() or "manual"
+            source_match = (not source) or (it_source == source)
+            if it_code == code and it_date == effective_date and source_match:
                 cnt += 1
             else:
                 new_items.append(it)

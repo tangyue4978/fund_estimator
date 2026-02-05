@@ -88,3 +88,15 @@ def delete_rows(table: str, params: Dict[str, str]) -> requests.Response:
         timeout=12,
     )
     return resp
+
+
+def update_rows(table: str, data: Dict[str, Any], params: Dict[str, str]) -> requests.Response:
+    url, _ = get_config()
+    resp = requests.patch(
+        f"{url}/rest/v1/{table}",
+        params=params,
+        json=data,
+        headers=_headers({"Prefer": "return=representation"}),
+        timeout=12,
+    )
+    return resp

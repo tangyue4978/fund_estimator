@@ -7,7 +7,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import streamlit as st
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -19,6 +19,7 @@ from services.watchlist_service import watchlist_list
 from services.accuracy_service import portfolio_gap_summary, portfolio_gap_table
 from services.fund_service import get_fund_profile
 from services.estimation_service import estimate_one
+from services.history_service import get_fund_cumulative_pnl_on
 from services import adjustment_service
 from storage import paths
 from services.auth_guard import require_login
@@ -385,6 +386,10 @@ def render_portfolio():
     cur_realized = float(cur.realized_pnl_end) if cur else 0.0
     editor_amount_map = _load_input_amount_map(date_str)
     default_record_amount = float(editor_amount_map.get(code, cur_shares * cur_cost) or 0.0)
+    yday_date_str = (date.fromisoformat(date_str) - timedelta(days=1)).isoformat()
+    yday_total_pnl_default = get_fund_cumulative_pnl_on(code, yday_date_str)
+    if yday_total_pnl_default is None:
+        yday_total_pnl_default = 0.0
 
     input_mode = st.radio("编辑方式", ["按金额/收益输入", "按份额/净值输入"], horizontal=True)
 
@@ -407,7 +412,13 @@ def render_portfolio():
         with c1:
             amount_end = st.number_input("当日结束持仓金额(元)", min_value=0.0, value=float(cur_value), step=100.0, format="%.2f")
         with c2:
-            yday_total_pnl = st.number_input("昨日累计收益(元)", value=0.0, step=10.0, format="%.2f")
+            yday_total_pnl = st.number_input(
+                "昨日累计收益(元)",
+                value=float(yday_total_pnl_default),
+                step=10.0,
+                format="%.2f",
+                key=f"yday_total_pnl_{date_str}_{code}",
+            )
 
         # 用当日预估涨跌幅估算“今日收益”
         denom = 100.0 + pct_for_calc
@@ -459,11 +470,19 @@ def render_portfolio():
         )
 
     note = "UI编辑"
+    st.caption("说明：此处生成的是“仓位校准流水”，用于把账本对齐到目标持仓，不代表真实成交价。")
 
-    if st.button("保存编辑（写入流水）", type="primary"):
-        # 防呆：原本有持仓但你改成 0，强制你在备注里写“确认清仓”
-        if cur_shares > 0 and float(shares_end) == 0.0:
-            st.warning("检测到你把持仓从非 0 改为 0（清仓）。")
+    is_clearing = cur_shares > 0 and float(shares_end) == 0.0
+    clear_confirmed = True
+    if is_clearing:
+        st.warning("检测到你把持仓从非 0 改为 0（清仓）。")
+        clear_confirmed = st.checkbox(
+            "我确认这是清仓操作，并同意写入校准流水",
+            value=False,
+            key=f"confirm_clear_{date_str}_{code}",
+        )
+
+    if st.button("保存编辑（写入流水）", type="primary", disabled=(is_clearing and not clear_confirmed)):
 
         apply_position_edit(
             effective_date=date_str,

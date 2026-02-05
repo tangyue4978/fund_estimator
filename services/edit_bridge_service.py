@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from typing import Optional, Dict
 
 from services.snapshot_service import build_positions_as_of
-from services.adjustment_service import add_adjustment
+from services.adjustment_service import add_adjustment, remove_adjustments_by_code_date
 
 
 def _get_snapshot_map(d: str) -> Dict[str, dict]:
@@ -30,7 +30,9 @@ def apply_position_edit(
 ) -> None:
     """
     把“编辑持仓结果”转成流水：
-    对比 effective_date 的前一日快照（<=前一日）与当前编辑目标，生成 BUY/SELL/CASH_ADJ。
+    对比 effective_date 当日“去掉旧 UI 编辑流水后的快照”与当前编辑目标，
+    生成 BUY/SELL/CASH_ADJ。
+    仅覆盖 source=ui_edit 的当日旧流水，不影响手工录入的真实流水。
 
     约定（MVP）：
     - BUY/SELL 的 price 使用 avg_cost_nav_end（即你输入的成本净值）
@@ -45,18 +47,16 @@ def apply_position_edit(
     if avg_cost_nav_end < 0:
         raise ValueError("avg_cost_nav_end must be >= 0")
 
-    # 前一日
-    d = date.fromisoformat(effective_date)
-    prev = (d - timedelta(days=1)).isoformat()
+    _ = date.fromisoformat(effective_date)  # validate date format
+    # 覆盖模式（仅UI编辑流水）：删除当日旧 ui_edit，再按目标重建 ui_edit。
+    remove_adjustments_by_code_date(code, effective_date, source="ui_edit")
 
-    prev_map = _get_snapshot_map(prev)
-    prev_pos = prev_map.get(code, {"shares_end": 0.0, "avg_cost_nav_end": 0.0, "realized_pnl_end": 0.0})
-
-    prev_sh = float(prev_pos["shares_end"])
-    prev_real = float(prev_pos["realized_pnl_end"])
+    base_map = _get_snapshot_map(effective_date)
+    base_pos = base_map.get(code, {"shares_end": 0.0, "avg_cost_nav_end": 0.0, "realized_pnl_end": 0.0})
+    base_sh = float(base_pos["shares_end"])
 
     # 1) shares 差异 → BUY/SELL
-    delta_sh = float(shares_end) - prev_sh
+    delta_sh = float(shares_end) - base_sh
     if abs(delta_sh) > 1e-9:
         if delta_sh > 0:
             add_adjustment(
@@ -66,6 +66,7 @@ def apply_position_edit(
                 shares=delta_sh,
                 price=float(avg_cost_nav_end) if avg_cost_nav_end > 0 else 1.0,
                 note=note or "edit->BUY",
+                source="ui_edit",
             )
         else:
             add_adjustment(
@@ -75,6 +76,7 @@ def apply_position_edit(
                 shares=abs(delta_sh),
                 price=float(avg_cost_nav_end) if avg_cost_nav_end > 0 else 1.0,
                 note=note or "edit->SELL",
+                source="ui_edit",
             )
 
     # 2) realized 差异 → CASH_ADJ
@@ -92,4 +94,5 @@ def apply_position_edit(
             effective_date=effective_date,
             cash=delta_real,
             note=note or "edit->CASH_ADJ",
+            source="ui_edit",
         )
