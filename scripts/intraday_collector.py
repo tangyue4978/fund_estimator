@@ -121,8 +121,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     settle_retry_sec = max(60, int(args.settle_retry_min) * 60)
     settle_days_back = max(1, int(args.settle_days_back))
     last_settle_try_ts = 0.0
-    last_settle_try_date = ""
-    settle_done_today = False
 
     _print(
         "started. "
@@ -136,39 +134,33 @@ def main(argv: Optional[List[str]] = None) -> int:
         ds = _today_str()
         now_ts = time.time()
 
-        if ds != last_settle_try_date:
-            settle_done_today = False
-
         # Evening auto settle:
-        # - first attempt every day after settle_hour
-        # - retry every settle_retry_min until pending becomes 0 or deadline arrives
+        # - keep probing pending within settle window
+        # - if pending > 0, run settle_pending_days
         minutes_now = _minutes_of_day(dt)
         in_settle_window = settle_start_min <= minutes_now < settle_deadline_min
-        can_try_settle = in_settle_window and (not settle_done_today)
-        first_try_today = (last_settle_try_date != ds)
         retry_due = (now_ts - last_settle_try_ts) >= settle_retry_sec
-        if can_try_settle and (first_try_today or retry_due):
+        if in_settle_window and retry_due:
             try:
-                _, settled_total = settle_pending_days(settle_days_back)
                 pending_count = count_pending_settlement(settle_days_back)
                 last_settle_try_ts = now_ts
-                last_settle_try_date = ds
-                if pending_count <= 0:
-                    settle_done_today = True
+                if pending_count > 0:
+                    _, settled_total = settle_pending_days(settle_days_back)
+                    pending_after = count_pending_settlement(settle_days_back)
                     _print(
-                        f"auto settle done: +{settled_total} rows, pending={pending_count} "
+                        f"auto settle run: +{settled_total} rows, pending_before={pending_count}, pending_after={pending_after} "
                         f"(days_back={settle_days_back})"
                     )
+                    pending_count = pending_after
                 else:
                     _print(
-                        f"auto settle pending={pending_count}, settled_this_round={settled_total}, "
+                        f"auto settle probe: pending={pending_count}, "
                         f"will retry in {int(settle_retry_sec/60)} min"
                     )
                 _write_status({
                     "running": True,
                     "date": ds,
                     "phase": "auto_settle",
-                    "settled_total": int(settled_total),
                     "pending_count": int(pending_count),
                     "settle_hour": settle_hour,
                     "settle_deadline_hour": settle_deadline_hour,
@@ -176,7 +168,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 })
             except Exception as e:
                 last_settle_try_ts = now_ts
-                last_settle_try_date = ds
                 _print(f"auto settle error: {e}")
                 _write_status({
                     "running": True,
