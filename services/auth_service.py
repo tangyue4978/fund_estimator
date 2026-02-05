@@ -13,6 +13,7 @@ from storage.json_store import ensure_json_file, update_json
 
 
 _PBKDF2_ITER = 200_000
+DEFAULT_DEVELOPER = "老王养基"
 
 
 def _now_iso() -> str:
@@ -78,16 +79,23 @@ def register_user(phone: str, password: str) -> Tuple[bool, str, str | None]:
     if supabase_client.is_enabled():
         try:
             user_id = _to_user_id(norm_phone)
-            resp = supabase_client.insert_row(
-                "app_users",
-                {
-                    "phone": norm_phone,
-                    "user_id": user_id,
-                    "password_hash": _password_hash(password),
-                    "created_at": _now_iso(),
-                    "updated_at": _now_iso(),
-                },
-            )
+            payload = {
+                "phone": norm_phone,
+                "user_id": user_id,
+                "password_hash": _password_hash(password),
+                "developer": DEFAULT_DEVELOPER,
+                "created_at": _now_iso(),
+                "updated_at": _now_iso(),
+            }
+            resp = supabase_client.insert_row("app_users", payload)
+            # Backward compatibility: some existing schemas may not have developer column yet.
+            if resp.status_code in (400, 404):
+                payload.pop("developer", None)
+                payload["inviter"] = DEFAULT_DEVELOPER
+                resp = supabase_client.insert_row("app_users", payload)
+            if resp.status_code in (400, 404):
+                payload.pop("inviter", None)
+                resp = supabase_client.insert_row("app_users", payload)
             if resp.status_code in (200, 201):
                 return True, "注册成功", user_id
             if resp.status_code == 409:
@@ -115,6 +123,7 @@ def register_user(phone: str, password: str) -> Tuple[bool, str, str | None]:
             "phone": norm_phone,
             "user_id": _to_user_id(norm_phone),
             "password_hash": _password_hash(password),
+            "developer": DEFAULT_DEVELOPER,
             "created_at": _now_iso(),
             "updated_at": _now_iso(),
         }

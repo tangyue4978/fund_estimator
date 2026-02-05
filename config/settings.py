@@ -30,3 +30,8 @@ SAVE_RAW_HTTP = True
 
 # 重试次数（requests adapter）
 HTTP_RETRIES = 3
+
+# Multi-source cross-check (holdings estimate vs GSZ estimate)
+ENABLE_MULTI_SOURCE_CROSSCHECK = True
+CROSSCHECK_WARN_DIFF_PCT = 1.2
+CROSSCHECK_SEVERE_DIFF_PCT = 2.5

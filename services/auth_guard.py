@@ -2,8 +2,45 @@ from __future__ import annotations
 
 import streamlit as st
 
-from services.auth_service import login_user, register_user
+from services.auth_service import DEFAULT_DEVELOPER, login_user, register_user
 from storage import paths
+
+
+def _read_auth_from_query() -> tuple[str, str]:
+    try:
+        qp = st.query_params
+        uid = qp.get("uid", "")
+        phone = qp.get("phone", "")
+        if isinstance(uid, list):
+            uid = uid[0] if uid else ""
+        if isinstance(phone, list):
+            phone = phone[0] if phone else ""
+        return str(uid or "").strip(), str(phone or "").strip()
+    except Exception:
+        return "", ""
+
+
+def _write_auth_to_query(phone: str, user_id: str) -> None:
+    uid = str(user_id or "").strip()
+    ph = str(phone or "").strip()
+    if not uid:
+        return
+    try:
+        st.query_params["uid"] = uid
+        if ph:
+            st.query_params["phone"] = ph
+    except Exception:
+        pass
+
+
+def _clear_auth_query() -> None:
+    try:
+        if "uid" in st.query_params:
+            del st.query_params["uid"]
+        if "phone" in st.query_params:
+            del st.query_params["phone"]
+    except Exception:
+        pass
 
 
 def _set_login_state(phone: str, user_id: str) -> None:
@@ -12,6 +49,7 @@ def _set_login_state(phone: str, user_id: str) -> None:
     st.session_state["auth_user_id"] = str(user_id)
     st.session_state["fund_estimator_user_id"] = str(user_id)
     paths.set_active_user(str(user_id))
+    _write_auth_to_query(phone, user_id)
 
 
 def _is_logged_in() -> bool:
@@ -21,6 +59,22 @@ def _is_logged_in() -> bool:
         paths.set_active_user(uid)
         st.session_state["fund_estimator_user_id"] = uid
         return True
+
+    # Cross-page fallback: recover from process-level active user/env.
+    uid_env = str(paths.current_user_id() or "").strip()
+    if uid_env and uid_env != "public":
+        st.session_state["auth_logged_in"] = True
+        st.session_state["auth_user_id"] = uid_env
+        st.session_state["fund_estimator_user_id"] = uid_env
+        if "auth_phone" not in st.session_state:
+            st.session_state["auth_phone"] = ""
+        return True
+
+    # Hard refresh can lose session_state. Restore from query params when present.
+    uid_q, phone_q = _read_auth_from_query()
+    if uid_q:
+        _set_login_state(phone_q, uid_q)
+        return True
     return False
 
 
@@ -28,6 +82,7 @@ def logout() -> None:
     for k in ("auth_logged_in", "auth_phone", "auth_user_id", "fund_estimator_user_id"):
         st.session_state.pop(k, None)
     paths.set_active_user("public")
+    _clear_auth_query()
 
 
 def require_login() -> str:
@@ -59,6 +114,7 @@ def require_login() -> str:
 
     with tab_register:
         with st.form("register_form"):
+            st.text_input("开发者", value=DEFAULT_DEVELOPER, disabled=True)
             phone = st.text_input("手机号（注册）", placeholder="请输入手机号")
             password = st.text_input("密码（至少6位）", type="password")
             password2 = st.text_input("确认密码", type="password")

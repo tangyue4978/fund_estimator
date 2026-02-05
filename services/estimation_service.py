@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Dict, List, Tuple
 
 from config import constants
+from config import settings
 from datasources.fund_api import fetch_gsz_quotes
 from datasources.fund_holdings_jsonmap import load_holdings, load_holdings_batch
 from datasources.market_api import fetch_stock_quotes, normalize_stock_code
@@ -19,6 +20,53 @@ def _latest_official_nav(code: str) -> Tuple[float, str | None]:
         return 0.0, None
     last = items[-1]
     return float(last.nav), last.nav_date
+
+
+def _append_warning(base: str, extra: str) -> str:
+    left = str(base or "").strip()
+    right = str(extra or "").strip()
+    if not right:
+        return left
+    if not left:
+        return right
+    return f"{left}; {right}"
+
+
+def _cross_check_holdings_vs_gsz(est: EstimateResult, q) -> EstimateResult:
+    """
+    Cross-check holdings-weighted estimate against GSZ source.
+    If deviation is large, downgrade confidence and append warning.
+    """
+    if not getattr(settings, "ENABLE_MULTI_SOURCE_CROSSCHECK", True):
+        return est
+    if est.method != constants.METHOD_HOLDING_WEIGHTED:
+        return est
+    if not q:
+        return est
+
+    try:
+        gsz_pct = float(q.gszzl)
+    except Exception:
+        return est
+
+    warn_diff = float(getattr(settings, "CROSSCHECK_WARN_DIFF_PCT", 1.2) or 1.2)
+    severe_diff = float(getattr(settings, "CROSSCHECK_SEVERE_DIFF_PCT", 2.5) or 2.5)
+    if warn_diff <= 0:
+        return est
+    if severe_diff < warn_diff:
+        severe_diff = warn_diff
+
+    diff = abs(float(est.est_change_pct) - gsz_pct)
+    if diff <= warn_diff:
+        return est
+
+    factor = 0.80 if diff <= severe_diff else 0.60
+    est.confidence = max(0.15, min(1.0, est.confidence * factor))
+    est.warning = _append_warning(
+        est.warning,
+        f"cross-check mismatch (holdings {est.est_change_pct:.2f}% vs gsz {gsz_pct:.2f}%, diff {diff:.2f}%)",
+    )
+    return est
 
 
 def _estimate_from_gsz(code: str, name: str, q, *, method: str) -> EstimateResult:
@@ -135,7 +183,7 @@ def estimate_one(code: str) -> EstimateResult:
         stock_quotes = fetch_stock_quotes(stock_codes)
         est = _estimate_by_holdings(code, name, holdings_obj, stock_quotes, q)
         if est:
-            return est
+            return _cross_check_holdings_vs_gsz(est, q)
 
     return _estimate_from_gsz(code, name, q, method=constants.METHOD_OFFICIAL_GSZ)
 
@@ -177,7 +225,7 @@ def estimate_many(codes: List[str]) -> Dict[str, EstimateResult]:
         if holdings_obj:
             est = _estimate_by_holdings(code, name, holdings_obj, stock_quotes, q)
             if est:
-                out[code] = est
+                out[code] = _cross_check_holdings_vs_gsz(est, q)
                 continue
 
         out[code] = _estimate_from_gsz(code, name, q, method=constants.METHOD_OFFICIAL_GSZ)
