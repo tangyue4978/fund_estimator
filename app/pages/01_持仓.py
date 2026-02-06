@@ -29,22 +29,16 @@ from storage import paths
 from services.auth_guard import require_login
 from services.trading_time import now_cn
 from storage.json_store import load_json, update_json
+from config import settings
 
 
 st.set_page_config(page_title="Portfolio", layout="wide")
 require_login()
 
 # auto refresh (Portfolio)
-PORTFOLIO_AUTO_REFRESH_SEC = 30
-_portfolio_refresh_sec = st.sidebar.number_input(
-    "Portfolio auto refresh (sec)",
-    min_value=30,
-    max_value=120,
-    value=PORTFOLIO_AUTO_REFRESH_SEC,
-    step=5,
-)
-_portfolio_auto_on = st.sidebar.checkbox("Enable portfolio auto refresh", value=True)
-if _portfolio_auto_on:
+_portfolio_auto_on = bool(getattr(settings, "PORTFOLIO_AUTO_REFRESH_ENABLED", True))
+_portfolio_refresh_sec = int(getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC", 30) or 30)
+if _portfolio_auto_on and _portfolio_refresh_sec > 0:
     if st_autorefresh is not None:
         st_autorefresh(interval=int(_portfolio_refresh_sec) * 1000, key="portfolio_autorefresh")
     elif hasattr(st, "autorefresh"):

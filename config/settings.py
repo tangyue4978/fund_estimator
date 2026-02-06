@@ -44,3 +44,11 @@ COLLECTOR_OFFMARKET_INTERVAL_SEC = 30 * 60
 # Home page auto refresh (code-only config, no UI)
 HOME_AUTO_REFRESH_ENABLED = True
 HOME_AUTO_REFRESH_SEC = 60
+
+# Portfolio page auto refresh (code-only config, no UI)
+PORTFOLIO_AUTO_REFRESH_ENABLED = True
+PORTFOLIO_AUTO_REFRESH_SEC = 30
+
+# Fund detail page auto refresh (code-only config, no UI)
+FUND_DETAIL_AUTO_REFRESH_ENABLED = True
+FUND_DETAIL_AUTO_REFRESH_SEC = 30

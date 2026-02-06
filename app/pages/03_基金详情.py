@@ -28,16 +28,16 @@ from storage import paths
 from services.auth_guard import require_login
 from services.accuracy_service import fund_gap_summary, guess_gap_reasons, fund_gap_table
 from services.fund_service import get_fund_profile
+from config import settings
 
 
 st.set_page_config(page_title="Fund Detail", layout="wide")
 require_login()
 
 # auto refresh
-AUTO_REFRESH_SEC = 30
-_refresh_sec = st.sidebar.number_input("Auto refresh (sec)", min_value=30, max_value=120, value=AUTO_REFRESH_SEC, step=5)
-_auto_on = st.sidebar.checkbox("Enable auto refresh", value=True)
-if _auto_on:
+_auto_on = bool(getattr(settings, "FUND_DETAIL_AUTO_REFRESH_ENABLED", True))
+_refresh_sec = int(getattr(settings, "FUND_DETAIL_AUTO_REFRESH_SEC", 30) or 30)
+if _auto_on and _refresh_sec > 0:
     if st_autorefresh is not None:
         st_autorefresh(interval=int(_refresh_sec) * 1000, key="fund_detail_autorefresh")
     elif hasattr(st, "autorefresh"):
