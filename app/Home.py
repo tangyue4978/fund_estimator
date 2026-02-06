@@ -33,10 +33,9 @@ from services.trading_time import now_cn, is_cn_trading_time
 st.set_page_config(page_title="Fund Estimator", layout="wide")
 require_login()
 
-# auto refresh (Home)
-HOME_AUTO_REFRESH_SEC = 30
-_home_refresh_sec = st.sidebar.number_input("Home auto refresh (sec)", min_value=30, max_value=120, value=HOME_AUTO_REFRESH_SEC, step=5)
-_home_auto_on = st.sidebar.checkbox("Enable home auto refresh", value=True)
+# auto refresh (Home) - code-only config
+_home_auto_on = bool(getattr(settings, "HOME_AUTO_REFRESH_ENABLED", True))
+_home_refresh_sec = int(getattr(settings, "HOME_AUTO_REFRESH_SEC", 30) or 30)
 if _home_auto_on:
     if st_autorefresh is not None:
         st_autorefresh(interval=int(_home_refresh_sec) * 1000, key="home_autorefresh")
