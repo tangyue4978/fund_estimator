@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 from pathlib import Path
 
 # ---- bootstrap: ensure project root in sys.path ----
@@ -9,6 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # ✅ 关键：最早期初始化运行时目录（开发=项目目录；打包=AppData）
 from storage import paths
 from services.auth_guard import require_login
+from config import settings
 paths.ensure_dirs()
 
 import time
@@ -192,34 +193,23 @@ def render_watchlist():
         if text:
             st.toast(text, icon=icon or None)
 
-    st.sidebar.header("盘中采样")
-    only_trading = st.sidebar.checkbox("仅交易时段采样", value=True)
-    interval = st.sidebar.number_input("采样间隔（秒）", min_value=30, max_value=120, value=30, step=5)
-
-    col_s1, col_s2 = st.sidebar.columns(2)
+    st.sidebar.header("采样状态")
     running = _collector_running()
+    only_trading = True
+    interval = int(getattr(settings, "COLLECTOR_TRADING_INTERVAL_SEC", 60) or 60)
+    off_interval = int(getattr(settings, "COLLECTOR_OFFMARKET_INTERVAL_SEC", 1800) or 1800)
 
-
-    with col_s1:
-        if st.button("启动采样", width="stretch"):
-            ok, msg = _start_collector(int(interval), bool(only_trading))
-            if ok:
-                st.session_state["_collector_flash"] = {"text": "采样已启动（独立后台进程）", "icon": "🟢"}
-            else:
-                st.session_state["_collector_flash"] = {"text": f"采样启动失败：{msg}", "icon": "❌"}
-            st.rerun()
-
-    with col_s2:
-        if st.button("停止采样", width="stretch"):
-            ok, msg = _stop_collector()
-            if ok:
-                st.session_state["_collector_flash"] = {"text": "采样已停止", "icon": "🛑"}
-            else:
-                st.session_state["_collector_flash"] = {"text": f"停止失败：{msg}", "icon": "❌"}
-            st.rerun()
+    if (not running) and bool(getattr(settings, "COLLECTOR_AUTO_START", True)):
+        ok, msg = _start_collector(interval, False)
+        running = ok
+        if ok:
+            st.session_state["_collector_flash"] = {"text": "采样已自动启动", "icon": "✅"}
+        else:
+            st.session_state["_collector_flash"] = {"text": f"采样自动启动失败：{msg}", "icon": "❌"}
 
     st.sidebar.caption(
-        f"采样状态：{'运行中' if running else '未运行'}。采样为独立后台进程，切换到其他 tab 也会继续。"
+        f"采样状态：{'运行中' if running else '未运行'}。"
+        f"盘中每 {interval}s，非交易时段每 {int(off_interval/60)} 分钟刷新净值。"
     )
 
     col1, col2, col3 = st.columns([2, 1, 1])

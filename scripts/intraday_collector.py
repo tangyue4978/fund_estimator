@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import datetime, date
+from datetime import datetime, date, time as dtime, timedelta
 from typing import List, Dict, Optional
 import json
 from pathlib import Path
@@ -50,6 +50,34 @@ def _is_close_window(dt: datetime, minutes: int = 2) -> bool:
     hm = dt.hour * 60 + dt.minute
     close_hm = 15 * 60  # 15:00
     return abs(hm - close_hm) <= minutes
+
+
+def _prev_trading_day(d: date) -> date:
+    """
+    Return previous CN trading day (skip weekends).
+    """
+    cur = d - timedelta(days=1)
+    while cur.weekday() >= 5:
+        cur -= timedelta(days=1)
+    return cur
+
+
+def _target_official_nav_date(dt: datetime) -> date:
+    """
+    - After market close (>=15:00): use today.
+    - Otherwise: use previous trading day.
+    """
+    if dt.weekday() >= 5:
+        return _prev_trading_day(dt.date())
+    if dt.time() >= dtime(15, 0):
+        return dt.date()
+    return _prev_trading_day(dt.date())
+
+
+def _effective_interval(dt: datetime, trading_sec: int, off_sec: int) -> int:
+    if _is_cn_trading_time(dt):
+        return max(30, int(trading_sec))
+    return max(300, int(off_sec))
 
 
 def _minutes_of_day(dt: datetime) -> int:
@@ -104,16 +132,23 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # 延迟 import（避免脚本启动时因依赖加载失败导致无提示退出）
     try:
+        from config import settings
+        from config import constants
+        from domain.estimate import EstimateResult
+        from datasources.nav_api import fetch_official_nav_for_date
         from services.watchlist_service import watchlist_list
         from services.estimation_service import estimate_many
-        from services.intraday_service import record_intraday_point, intraday_append_close_marker
+        from services.intraday_service import record_intraday_point, intraday_append_close_marker, get_intraday_series
         from services.settlement_service import count_pending_settlement, settle_pending_days
+        from services.fund_service import get_fund_profile
     except Exception as e:
         _print(f"IMPORT ERROR: {e}")
         return 2
 
     interval = max(30, int(args.interval))
     only_trading = bool(args.only_trading)
+    trading_interval = int(getattr(settings, "COLLECTOR_TRADING_INTERVAL_SEC", 60) or 60)
+    off_interval = int(getattr(settings, "COLLECTOR_OFFMARKET_INTERVAL_SEC", 1800) or 1800)
     settle_hour = max(0, min(23, int(args.settle_hour)))
     settle_deadline_hour = max(settle_hour + 1, min(24, int(args.settle_deadline_hour)))
     settle_start_min = settle_hour * 60
@@ -133,6 +168,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         dt = _now()
         ds = _today_str()
         now_ts = time.time()
+        interval = _effective_interval(dt, trading_interval, off_interval)
 
         # Evening auto settle:
         # - keep probing pending within settle window
@@ -220,6 +256,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "date": ds,
                 "phase": "outside_trading",
                 "codes_count": len(codes),
+                "interval_sec": int(interval),
             })
             if args.once:
                 return 0
@@ -234,6 +271,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "date": ds,
                 "phase": "estimated",
                 "codes_count": len(codes),
+                "interval_sec": int(interval),
             })
         except Exception as e:
             _print(f"estimate_many error: {e}")
@@ -265,7 +303,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 })
 
         # 普通盘中点
-        if (not only_trading) or in_trading:
+        if in_trading:
             ok = 0
             try:
                 for c in codes:
@@ -281,6 +319,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "phase": "sampled",
                     "codes_count": len(codes),
                     "sampled_ok": ok,
+                    "interval_sec": int(interval),
                 })
             except Exception as e:
                 _print(f"record_intraday_point error: {e}")
@@ -289,6 +328,75 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "date": ds,
                     "phase": "error",
                     "last_error": f"record_intraday_point: {e}",
+                })
+
+        # Off-market: refresh official NAV points at lower frequency.
+        if (not in_trading) and (not in_close_window) and (not only_trading):
+            try:
+                target_date = _target_official_nav_date(dt)
+                ok = 0
+                for c in codes:
+                    off = fetch_official_nav_for_date(c, target_date.isoformat())
+                    if not off:
+                        continue
+                    # Only write when official nav changes (or first time).
+                    last_official = None
+                    try:
+                        pts = get_intraday_series(c, date_str=ds)
+                        for it in reversed(pts):
+                            if str(it.get("warning", "")).startswith("official nav"):
+                                last_official = it
+                                break
+                    except Exception:
+                        last_official = None
+
+                    if last_official is not None:
+                        try:
+                            last_nav = float(last_official.get("est_nav", 0.0) or 0.0)
+                        except Exception:
+                            last_nav = 0.0
+                        last_warn = str(last_official.get("warning", ""))
+                        if abs(last_nav - float(off.nav)) <= 1e-9 and off.nav_date in last_warn:
+                            continue
+
+                    try:
+                        prof = get_fund_profile(c)
+                        name = (prof.name or "").strip() if prof else ""
+                    except Exception:
+                        name = ""
+                    if not name:
+                        name = f"基金{c}"
+                    est = EstimateResult(
+                        code=c,
+                        name=name,
+                        est_nav=float(off.nav),
+                        est_change_pct=0.0,
+                        method=constants.METHOD_FROZEN_NAV,
+                        confidence=0.25,
+                        warning=f"official nav {off.nav_date}",
+                        est_time=_now().isoformat(timespec="seconds"),
+                        suggested_refresh_sec=int(off_interval),
+                    )
+                    record_intraday_point(target=c, estimate=est, date_str=ds)
+                    ok += 1
+                if ok:
+                    _print(f"off-market nav refresh {ok}/{len(codes)} (target_date={target_date.isoformat()})")
+                _write_status({
+                    "running": True,
+                    "date": ds,
+                    "phase": "offmarket_nav",
+                    "codes_count": len(codes),
+                    "sampled_ok": ok,
+                    "target_nav_date": target_date.isoformat(),
+                    "interval_sec": int(interval),
+                })
+            except Exception as e:
+                _print(f"off-market nav refresh error: {e}")
+                _write_status({
+                    "running": True,
+                    "date": ds,
+                    "phase": "error",
+                    "last_error": f"offmarket_nav: {e}",
                 })
 
         if args.once:
