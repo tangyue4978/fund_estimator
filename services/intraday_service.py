@@ -5,16 +5,19 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from storage import paths
+from services.trading_time import now_cn
 from storage.json_store import ensure_json_file, update_json
 from domain.estimate import EstimateResult
 
 
 def _today_str() -> str:
-    return date.today().isoformat()
+    # Use CN date to stay consistent with collector and trading session logic.
+    return now_cn().date().isoformat()
 
 
 def _now_hhmmss() -> str:
-    return datetime.now().strftime("%H:%M:%S")
+    # Use CN time so intraday points are in trading-session window.
+    return now_cn().strftime("%H:%M:%S")
 
 
 def _ensure_intraday_file(date_str: str, data: Optional[dict] = None) -> dict:

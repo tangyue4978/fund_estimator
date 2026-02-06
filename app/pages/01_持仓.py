@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 from pathlib import Path
 
 # ---- bootstrap: ensure project root in sys.path ----
@@ -8,6 +8,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import streamlit as st
 from datetime import date, timedelta
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:  # pragma: no cover
+    st_autorefresh = None
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -23,11 +27,28 @@ from services.history_service import get_fund_cumulative_pnl_on
 from services import adjustment_service
 from storage import paths
 from services.auth_guard import require_login
+from services.trading_time import now_cn
 from storage.json_store import load_json, update_json
 
 
 st.set_page_config(page_title="Portfolio", layout="wide")
 require_login()
+
+# auto refresh (Portfolio)
+PORTFOLIO_AUTO_REFRESH_SEC = 30
+_portfolio_refresh_sec = st.sidebar.number_input(
+    "Portfolio auto refresh (sec)",
+    min_value=30,
+    max_value=120,
+    value=PORTFOLIO_AUTO_REFRESH_SEC,
+    step=5,
+)
+_portfolio_auto_on = st.sidebar.checkbox("Enable portfolio auto refresh", value=True)
+if _portfolio_auto_on:
+    if st_autorefresh is not None:
+        st_autorefresh(interval=int(_portfolio_refresh_sec) * 1000, key="portfolio_autorefresh")
+    elif hasattr(st, "autorefresh"):
+        st.autorefresh(interval=int(_portfolio_refresh_sec) * 1000, key="portfolio_autorefresh")
 
 
 def _input_amount_path() -> str:
@@ -127,7 +148,7 @@ def _remove_adjustments_by_code_safe(code: str) -> int:
 def render_portfolio():
     st.title("持仓 - 实时估值（按流水回放快照）")
 
-    d = st.date_input("as_of 日期", value=date.today())
+    d = st.date_input("as_of 日期", value=now_cn().date())
     date_str = d.isoformat()
 
     # 组合视图（快照口径）
