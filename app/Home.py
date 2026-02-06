@@ -141,12 +141,16 @@ def _start_collector(interval_sec: int, only_trading: bool) -> tuple[bool, str]:
     if only_trading:
         cmd.append("--only-trading")
     try:
+        # Ensure collector writes to the current user's data directory.
+        env = os.environ.copy()
+        env["FUND_ESTIMATOR_USER_ID"] = paths.current_user_id()
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         proc = subprocess.Popen(
             cmd,
             cwd=str(PROJECT_ROOT),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
             creationflags=creationflags,
         )
         _write_collector_pid(proc.pid)
