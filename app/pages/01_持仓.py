@@ -304,7 +304,7 @@ def render_portfolio():
                 "avg_cost_nav": "成本净值",
                 "cumulative_pnl": "累计收益",
                 "today_est_pnl": "今日预计收益",
-                "holding_total_current": "持仓总当前",
+                "holding_total_current": "持仓金额",
                 "est_nav": "预估净值",
                 "est_change_pct": "预估涨跌幅(%)",
                 "confidence": "置信度",
@@ -315,45 +315,83 @@ def render_portfolio():
                 "est_pnl_pct": "预估收益率(%)",
             }
         )
-        # 明细展示顺序：先标识和仓位，再收益与时间。
-        display_cols = [
+        # 明细展示顺序：核心字段优先，其余放后面
+        primary_cols = [
             "基金代码",
             "基金名称",
+            "持仓金额",
+            "预估涨跌幅(%)",
+            "今日预计收益",
+            "累计收益",
+            "估值时间",
+        ]
+        other_cols = [
             "份额",
             "成本净值",
             "预估净值",
-            "预估涨跌幅(%)",
-            "持仓总当前",
-            "今日预计收益",
-            "累计收益",
             "预估收益率(%)",
-            "估值时间",
             "置信度",
             "提示",
         ]
+        display_cols = primary_cols + other_cols
         display_cols = [c for c in display_cols if c in df_pos.columns]
         df_pos = df_pos[display_cols]
+        if "基金代码" in df_pos.columns:
+            df_pos["基金代码"] = df_pos["基金代码"].astype(str)
+        # Format est time to minutes.
+        if "估值时间" in df_pos.columns:
+            def _fmt_time(v):
+                s = str(v or "").strip()
+                if not s:
+                    return ""
+                if "T" in s:
+                    s = s.replace("T", " ")
+                return s[:16]
+            df_pos["估值时间"] = df_pos["估值时间"].apply(_fmt_time)
         # 默认按持仓总当前从大到小，优先看大仓位。
-        if "持仓总当前" in df_pos.columns:
-            df_pos = df_pos.sort_values(by="持仓总当前", ascending=False, kind="stable")
+        if "持仓金额" in df_pos.columns:
+            df_pos = df_pos.sort_values(by="持仓金额", ascending=False, kind="stable")
 
         # 末行追加“总计”
-        total_row = {c: "" for c in df_pos.columns}
+        total_row = {c: pd.NA for c in df_pos.columns}
         if "基金代码" in total_row:
             total_row["基金代码"] = "总计"
-        sum_cols = ["持仓总当前", "今日预计收益", "累计收益"]
+        sum_cols = ["持仓金额", "今日预计收益", "累计收益"]
         for c in sum_cols:
             if c in df_pos.columns:
-                total_row[c] = pd.to_numeric(df_pos[c], errors="coerce").fillna(0.0).sum()
-        # 组合预估涨跌幅(%)：基于“今日预计收益 + 总金额(持仓总当前)”反推。
-        if "预估涨跌幅(%)" in df_pos.columns and "今日预计收益" in total_row and "持仓总当前" in total_row:
+                total_row[c] = round(
+                    float(pd.to_numeric(df_pos[c], errors="coerce").fillna(0.0).sum()),
+                    2,
+                )
+        # 组合预估涨跌幅(%)：基于“今日预计收益 + 总金额(持仓金额)”反推。
+        if "预估涨跌幅(%)" in df_pos.columns and "今日预计收益" in total_row and "持仓金额" in total_row:
             total_today = float(total_row.get("今日预计收益", 0.0) or 0.0)
-            total_value = float(total_row.get("持仓总当前", 0.0) or 0.0)
+            total_value = float(total_row.get("持仓金额", 0.0) or 0.0)
             base = total_value - total_today
             total_row["预估涨跌幅(%)"] = (total_today / base * 100.0) if abs(base) > 1e-9 else 0.0
         df_pos = pd.concat([df_pos, pd.DataFrame([total_row])], ignore_index=True)
+
+        # Keep numeric values as numeric types for alignment.
+        numeric_cols = [
+            c for c in df_pos.columns
+            if c not in ("基金代码", "基金名称", "估值时间", "提示")
+        ]
+        for c in numeric_cols:
+            df_pos[c] = pd.to_numeric(df_pos[c], errors="coerce")
+        # Round key numeric columns for display.
+        for c in [
+            "持仓金额",
+            "预估涨跌幅(%)",
+            "今日预计收益",
+            "累计收益",
+            "份额",
+            "预估收益率(%)",
+            "置信度",
+        ]:
+            if c in df_pos.columns:
+                df_pos[c] = df_pos[c].round(2)
     detail_height = 38 + max(len(df_pos), 1) * 35
-    if not df_pos.empty and "今日预计收益" in df_pos.columns:
+    if not df_pos.empty:
         def _color_row(row):
             try:
                 x = float(row.get("今日预计收益", 0.0))
@@ -367,8 +405,35 @@ def render_portfolio():
                 color = "black"
             return [f"color: {color}"] * len(row)
 
-        styler = df_pos.style.apply(_color_row, axis=1)
-        st.dataframe(styler, width="stretch", hide_index=True, height=detail_height)
+        styler = df_pos.style
+        if "今日预计收益" in df_pos.columns:
+            styler = styler.apply(_color_row, axis=1)
+
+        two_dec_cols = [
+            "持仓金额",
+            "预估涨跌幅(%)",
+            "今日预计收益",
+            "累计收益",
+            "份额",
+            "预估收益率(%)",
+            "置信度",
+        ]
+        four_dec_cols = ["成本净值", "预估净值"]
+        column_config = {
+            c: st.column_config.NumberColumn(format="%.2f")
+            for c in two_dec_cols
+            if c in df_pos.columns
+        }
+        for c in four_dec_cols:
+            if c in df_pos.columns:
+                column_config[c] = st.column_config.NumberColumn(format="%.4f")
+        st.dataframe(
+            styler,
+            width="stretch",
+            hide_index=True,
+            height=detail_height,
+            column_config=column_config or None,
+        )
     else:
         st.dataframe(df_pos, width="stretch", hide_index=True, height=detail_height)
 
