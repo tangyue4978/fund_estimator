@@ -35,10 +35,26 @@ from config import settings
 st.set_page_config(page_title="Portfolio", layout="wide")
 require_login()
 
+
+def _apply_silent_autorefresh_style() -> None:
+    if not bool(getattr(settings, "SILENT_AUTO_REFRESH_UI", True)):
+        return
+    st.markdown(
+        """
+<style>
+[data-testid="stStatusWidget"] { display: none !important; }
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # auto refresh (Portfolio)
 _portfolio_auto_on = bool(getattr(settings, "PORTFOLIO_AUTO_REFRESH_ENABLED", True))
-_portfolio_refresh_sec = int(getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC", 30) or 30)
+_portfolio_refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC", 30)
+_portfolio_refresh_sec = int(30 if _portfolio_refresh_raw is None else _portfolio_refresh_raw)
 if _portfolio_auto_on and _portfolio_refresh_sec > 0:
+    _apply_silent_autorefresh_style()
     if st_autorefresh is not None:
         st_autorefresh(interval=int(_portfolio_refresh_sec) * 1000, key="portfolio_autorefresh")
     elif hasattr(st, "autorefresh"):

@@ -230,12 +230,19 @@ def logs_dir() -> Path:
     return d
 
 
-def file_collector_status() -> Path:
-    return status_dir() / "collector_status.json"
+def file_collector_pid(user_id: str | None = None) -> Path:
+    uid = _sanitize_user_id(user_id) if user_id is not None else current_user_id()
+    return status_dir() / f"collector_{uid}.pid"
 
 
-def file_collector_log() -> Path:
-    return logs_dir() / "collector.log"
+def file_collector_status(user_id: str | None = None) -> Path:
+    uid = _sanitize_user_id(user_id) if user_id is not None else current_user_id()
+    return status_dir() / f"collector_status_{uid}.json"
+
+
+def file_collector_log(user_id: str | None = None) -> Path:
+    uid = _sanitize_user_id(user_id) if user_id is not None else current_user_id()
+    return logs_dir() / f"collector_{uid}.log"
 
 
 def _seed_runtime_data() -> None:

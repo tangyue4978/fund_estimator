@@ -24,19 +24,21 @@ status_candidates: list[Path] = []
 log_candidates: list[Path] = []
 
 if hasattr(paths, "file_collector_status"):
-    status_candidates.append(Path(paths.file_collector_status()))
+    status_candidates = [Path(paths.file_collector_status())]
 if hasattr(paths, "file_collector_log"):
-    log_candidates.append(Path(paths.file_collector_log()))
-if hasattr(paths, "status_dir"):
+    log_candidates = [Path(paths.file_collector_log())]
+if (not status_candidates) and hasattr(paths, "status_dir"):
     status_candidates.append(Path(paths.status_dir()) / "collector_status.json")
-if hasattr(paths, "runtime_root"):
-    rt = Path(paths.runtime_root())
-    status_candidates.append(rt / "status" / "collector_status.json")
-    log_candidates.append(rt / "logs" / "collector.log")
+if (not status_candidates) and hasattr(paths, "runtime_root"):
+    status_candidates.append(Path(paths.runtime_root()) / "status" / "collector_status.json")
+if (not log_candidates) and hasattr(paths, "runtime_root"):
+    log_candidates.append(Path(paths.runtime_root()) / "logs" / "collector.log")
 
 # 旧位置兜底（项目内 storage 目录）
-status_candidates.append(BASE_DIR / "storage" / "status" / "collector_status.json")
-log_candidates.append(BASE_DIR / "storage" / "logs" / "collector.log")
+if not status_candidates:
+    status_candidates.append(BASE_DIR / "storage" / "status" / "collector_status.json")
+if not log_candidates:
+    log_candidates.append(BASE_DIR / "storage" / "logs" / "collector.log")
 
 STATUS_PATH = _first_existing(status_candidates)
 LOG_PATH = _first_existing(log_candidates)

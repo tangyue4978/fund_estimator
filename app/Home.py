@@ -25,6 +25,10 @@ except Exception:  # pragma: no cover
     st_autorefresh = None
 
 from services.watchlist_service import watchlist_list, watchlist_add, watchlist_remove
+try:
+    from services.watchlist_service import watchlist_add_result
+except Exception:  # backward-compatible fallback for mixed deploy states
+    watchlist_add_result = None
 from services.estimation_service import estimate_many
 from services.intraday_service import record_intraday_point
 from services.trading_time import now_cn, is_cn_trading_time
@@ -33,10 +37,26 @@ from services.trading_time import now_cn, is_cn_trading_time
 st.set_page_config(page_title="Fund Estimator", layout="wide")
 require_login()
 
+
+def _apply_silent_autorefresh_style() -> None:
+    if not bool(getattr(settings, "SILENT_AUTO_REFRESH_UI", True)):
+        return
+    st.markdown(
+        """
+<style>
+[data-testid="stStatusWidget"] { display: none !important; }
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # auto refresh (Home) - code-only config
 _home_auto_on = bool(getattr(settings, "HOME_AUTO_REFRESH_ENABLED", True))
-_home_refresh_sec = int(getattr(settings, "HOME_AUTO_REFRESH_SEC", 30) or 30)
-if _home_auto_on:
+_home_refresh_raw = getattr(settings, "HOME_AUTO_REFRESH_SEC", 30)
+_home_refresh_sec = int(30 if _home_refresh_raw is None else _home_refresh_raw)
+if _home_auto_on and _home_refresh_sec > 0:
+    _apply_silent_autorefresh_style()
     if st_autorefresh is not None:
         st_autorefresh(interval=int(_home_refresh_sec) * 1000, key="home_autorefresh")
     elif hasattr(st, "autorefresh"):
@@ -55,6 +75,8 @@ def _is_close_window(now: datetime) -> bool:
 
 
 def _collector_pid_path() -> Path:
+    if hasattr(paths, "file_collector_pid"):
+        return Path(paths.file_collector_pid())
     # 兼容旧版 storage.paths（可能没有 status_dir）
     if hasattr(paths, "status_dir"):
         d = paths.status_dir()
@@ -64,7 +86,8 @@ def _collector_pid_path() -> Path:
     else:
         d = PROJECT_ROOT / "storage" / "status"
         d.mkdir(parents=True, exist_ok=True)
-    return d / "collector.pid"
+    uid = str(paths.current_user_id()).strip() or "public"
+    return d / f"collector_{uid}.pid"
 
 
 def _read_collector_pid() -> int | None:
@@ -219,8 +242,17 @@ def render_watchlist():
     with col2:
         if st.button("添加", width="stretch"):
             if code.strip():
-                watchlist_add(code.strip())
-                st.toast("已添加", icon="✅")
+                if callable(watchlist_add_result):
+                    res = watchlist_add_result(code.strip())
+                    if bool(res.get("ok")):
+                        msg = str(res.get("message", "已添加"))
+                        icon = "✅" if bool(res.get("cloud_synced", False)) else "⚠️"
+                        st.toast(msg, icon=icon)
+                    else:
+                        st.toast(str(res.get("message", "添加失败")), icon="❌")
+                else:
+                    watchlist_add(code.strip())
+                    st.toast("已添加", icon="✅")
                 st.rerun()
 
     with col3:

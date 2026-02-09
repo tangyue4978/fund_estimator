@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import streamlit as st
 
+from config import settings
 from services.auth_service import DEFAULT_DEVELOPER, login_user, register_user
 from services.collector_service import ensure_collector_running
 from storage import paths
 
 
+def _query_auth_enabled() -> bool:
+    return bool(getattr(settings, "AUTH_QUERY_LOGIN_ENABLED", False))
+
+
 def _read_auth_from_query() -> tuple[str, str]:
+    if not _query_auth_enabled():
+        return "", ""
     try:
         qp = st.query_params
         uid = qp.get("uid", "")
@@ -22,6 +29,8 @@ def _read_auth_from_query() -> tuple[str, str]:
 
 
 def _write_auth_to_query(phone: str, user_id: str) -> None:
+    if not _query_auth_enabled():
+        return
     uid = str(user_id or "").strip()
     ph = str(phone or "").strip()
     if not uid:
@@ -61,8 +70,6 @@ def _is_logged_in() -> bool:
     logged = bool(st.session_state.get("auth_logged_in"))
     uid = str(st.session_state.get("auth_user_id", "")).strip()
     if logged and uid:
-        # Keep auth marker in URL on every run so hard refresh can recover session.
-        _write_auth_to_query(str(st.session_state.get("auth_phone", "")), uid)
         paths.set_active_user(uid)
         st.session_state["fund_estimator_user_id"] = uid
         try:
@@ -71,7 +78,7 @@ def _is_logged_in() -> bool:
             pass
         return True
 
-    # Hard refresh can lose session_state. Restore from query params when present.
+    # Optional compatibility mode for old deployments.
     uid_q, phone_q = _read_auth_from_query()
     if uid_q:
         _set_login_state(phone_q, uid_q)

@@ -34,10 +34,26 @@ from config import settings
 st.set_page_config(page_title="Fund Detail", layout="wide")
 require_login()
 
+
+def _apply_silent_autorefresh_style() -> None:
+    if not bool(getattr(settings, "SILENT_AUTO_REFRESH_UI", True)):
+        return
+    st.markdown(
+        """
+<style>
+[data-testid="stStatusWidget"] { display: none !important; }
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # auto refresh
 _auto_on = bool(getattr(settings, "FUND_DETAIL_AUTO_REFRESH_ENABLED", True))
-_refresh_sec = int(getattr(settings, "FUND_DETAIL_AUTO_REFRESH_SEC", 30) or 30)
+_refresh_raw = getattr(settings, "FUND_DETAIL_AUTO_REFRESH_SEC", 30)
+_refresh_sec = int(30 if _refresh_raw is None else _refresh_raw)
 if _auto_on and _refresh_sec > 0:
+    _apply_silent_autorefresh_style()
     if st_autorefresh is not None:
         st_autorefresh(interval=int(_refresh_sec) * 1000, key="fund_detail_autorefresh")
     elif hasattr(st, "autorefresh"):
@@ -125,12 +141,17 @@ def _filter_trading_session(points: list) -> list:
 
 def _collector_running() -> bool:
     try:
-        if hasattr(paths, "status_dir"):
-            p = Path(paths.status_dir()) / "collector.pid"
+        if hasattr(paths, "file_collector_pid"):
+            p = Path(paths.file_collector_pid())
+        elif hasattr(paths, "status_dir"):
+            uid = str(paths.current_user_id()).strip() or "public"
+            p = Path(paths.status_dir()) / f"collector_{uid}.pid"
         elif hasattr(paths, "runtime_root"):
-            p = Path(paths.runtime_root()) / "status" / "collector.pid"
+            uid = str(paths.current_user_id()).strip() or "public"
+            p = Path(paths.runtime_root()) / "status" / f"collector_{uid}.pid"
         else:
-            p = PROJECT_ROOT / "storage" / "status" / "collector.pid"
+            uid = "public"
+            p = PROJECT_ROOT / "storage" / "status" / f"collector_{uid}.pid"
         raw = p.read_text(encoding="utf-8").strip()
         pid = int(raw) if raw else 0
     except Exception:

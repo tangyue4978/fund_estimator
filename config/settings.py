@@ -52,3 +52,12 @@ PORTFOLIO_AUTO_REFRESH_SEC = 30
 # Fund detail page auto refresh (code-only config, no UI)
 FUND_DETAIL_AUTO_REFRESH_ENABLED = True
 FUND_DETAIL_AUTO_REFRESH_SEC = 30
+
+# Hide Streamlit running status widget during auto-refresh (code-only config, no UI)
+SILENT_AUTO_REFRESH_UI = True
+
+# Security: do not trust uid/phone in URL query to restore login on web.
+AUTH_QUERY_LOGIN_ENABLED = False
+
+# Web mode: if cloud sync fails, do not keep local-only watchlist items.
+WEB_WATCHLIST_REQUIRE_CLOUD_SYNC = True

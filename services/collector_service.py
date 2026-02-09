@@ -10,6 +10,8 @@ from storage import paths
 
 
 def _collector_pid_path() -> Path:
+    if hasattr(paths, "file_collector_pid"):
+        return Path(paths.file_collector_pid())
     if hasattr(paths, "status_dir"):
         d = paths.status_dir()
     elif hasattr(paths, "runtime_root"):
@@ -18,7 +20,8 @@ def _collector_pid_path() -> Path:
     else:
         d = paths.project_root() / "storage" / "status"
         d.mkdir(parents=True, exist_ok=True)
-    return d / "collector.pid"
+    uid = str(paths.current_user_id()).strip() or "public"
+    return d / f"collector_{uid}.pid"
 
 
 def _read_collector_pid() -> int | None:
