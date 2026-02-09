@@ -218,6 +218,12 @@ def file_auth_users() -> str:
     return str(d / "users.json")
 
 
+def file_auth_sessions() -> str:
+    d = data_dir() / "auth"
+    d.mkdir(parents=True, exist_ok=True)
+    return str(d / "sessions.json")
+
+
 def status_dir() -> Path:
     d = runtime_root() / "status"
     d.mkdir(parents=True, exist_ok=True)

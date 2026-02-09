@@ -59,5 +59,9 @@ SILENT_AUTO_REFRESH_UI = True
 # Security: do not trust uid/phone in URL query to restore login on web.
 AUTH_QUERY_LOGIN_ENABLED = False
 
+# Keep web login after browser refresh via short-lived session id in query params.
+AUTH_PERSIST_LOGIN_ENABLED = True
+AUTH_SESSION_DAYS = 14
+
 # Web mode: if cloud sync fails, do not keep local-only watchlist items.
 WEB_WATCHLIST_REQUIRE_CLOUD_SYNC = True
