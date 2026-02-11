@@ -48,9 +48,13 @@ def _apply_silent_autorefresh_style() -> None:
 
 
 # auto refresh
+_web_runtime = bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
 _auto_on = bool(getattr(settings, "FUND_DETAIL_AUTO_REFRESH_ENABLED", True))
 _refresh_raw = getattr(settings, "FUND_DETAIL_AUTO_REFRESH_SEC", 30)
 _refresh_sec = int(30 if _refresh_raw is None else _refresh_raw)
+if _web_runtime:
+    _auto_on = _auto_on
+    _refresh_sec = 60 if is_cn_trading_time(now_cn()) else 30 * 60
 if _auto_on and _refresh_sec > 0:
     _apply_silent_autorefresh_style()
     if st_autorefresh is not None:

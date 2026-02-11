@@ -52,9 +52,13 @@ def _apply_silent_autorefresh_style() -> None:
 
 
 # auto refresh (Home) - code-only config
+_web_runtime = bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
 _home_auto_on = bool(getattr(settings, "HOME_AUTO_REFRESH_ENABLED", True))
 _home_refresh_raw = getattr(settings, "HOME_AUTO_REFRESH_SEC", 30)
 _home_refresh_sec = int(30 if _home_refresh_raw is None else _home_refresh_raw)
+if _web_runtime:
+    _home_auto_on = _home_auto_on
+    _home_refresh_sec = 60 if is_cn_trading_time(now_cn()) else 30 * 60
 if _home_auto_on and _home_refresh_sec > 0:
     _apply_silent_autorefresh_style()
     if st_autorefresh is not None:

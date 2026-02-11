@@ -7,6 +7,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import streamlit as st
+import os
 from datetime import date, timedelta
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -27,7 +28,7 @@ from services.history_service import get_fund_cumulative_pnl_on
 from services import adjustment_service
 from storage import paths
 from services.auth_guard import require_login
-from services.trading_time import now_cn
+from services.trading_time import now_cn, is_cn_trading_time
 from storage.json_store import load_json, update_json
 from config import settings
 
@@ -50,9 +51,13 @@ def _apply_silent_autorefresh_style() -> None:
 
 
 # auto refresh (Portfolio)
+_web_runtime = bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
 _portfolio_auto_on = bool(getattr(settings, "PORTFOLIO_AUTO_REFRESH_ENABLED", True))
 _portfolio_refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC", 30)
 _portfolio_refresh_sec = int(30 if _portfolio_refresh_raw is None else _portfolio_refresh_raw)
+if _web_runtime:
+    _portfolio_auto_on = _portfolio_auto_on
+    _portfolio_refresh_sec = 60 if is_cn_trading_time(now_cn()) else 30 * 60
 if _portfolio_auto_on and _portfolio_refresh_sec > 0:
     _apply_silent_autorefresh_style()
     if st_autorefresh is not None:
