@@ -326,7 +326,12 @@ def render_watchlist():
         try:
             st.query_params["code"] = sel  # 新版
         except Exception:
-            st.experimental_set_query_params(code=sel)  # 旧版
+            try:
+                qp = st.experimental_get_query_params()  # 旧版：先保留已有参数
+                qp["code"] = [sel]
+                st.experimental_set_query_params(**qp)
+            except Exception:
+                st.experimental_set_query_params(code=sel)
         # ✅ 注意：switch_page 的路径必须相对 app/ 目录
         st.switch_page("pages/03_基金详情.py")
 

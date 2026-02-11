@@ -16,6 +16,83 @@ from storage.json_store import update_json
 _AUTH_SESSION_KEY = "sid"
 
 
+def _get_query_params_mapping() -> dict[str, list[str]]:
+    # Compatible with both new st.query_params and legacy experimental APIs.
+    try:
+        qp = st.query_params
+        out: dict[str, list[str]] = {}
+        for k in qp.keys():
+            v = qp.get(k, "")
+            if isinstance(v, list):
+                out[str(k)] = [str(x) for x in v if str(x) != ""]
+            else:
+                sv = str(v)
+                out[str(k)] = [sv] if sv != "" else []
+        return out
+    except Exception:
+        pass
+
+    try:
+        raw = st.experimental_get_query_params()
+        out: dict[str, list[str]] = {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                if isinstance(v, list):
+                    out[str(k)] = [str(x) for x in v if str(x) != ""]
+                else:
+                    sv = str(v)
+                    out[str(k)] = [sv] if sv != "" else []
+        return out
+    except Exception:
+        return {}
+
+
+def _get_query_param_one(key: str) -> str:
+    values = _get_query_params_mapping().get(str(key), [])
+    if not values:
+        return ""
+    return str(values[0]).strip()
+
+
+def _set_query_param(key: str, value: str) -> None:
+    k = str(key).strip()
+    v = str(value).strip()
+    if not k or not v:
+        return
+    try:
+        st.query_params[k] = v
+        return
+    except Exception:
+        pass
+
+    try:
+        params = _get_query_params_mapping()
+        params[k] = [v]
+        st.experimental_set_query_params(**params)
+    except Exception:
+        pass
+
+
+def _delete_query_param(key: str) -> None:
+    k = str(key).strip()
+    if not k:
+        return
+    try:
+        if k in st.query_params:
+            del st.query_params[k]
+        return
+    except Exception:
+        pass
+
+    try:
+        params = _get_query_params_mapping()
+        if k in params:
+            params.pop(k, None)
+            st.experimental_set_query_params(**params)
+    except Exception:
+        pass
+
+
 def _persist_login_enabled() -> bool:
     return bool(getattr(settings, "AUTH_PERSIST_LOGIN_ENABLED", True))
 
@@ -53,13 +130,7 @@ def _hash_session_token(token: str) -> str:
 def _read_sid_from_query() -> str:
     if not _persist_login_enabled():
         return ""
-    try:
-        sid = st.query_params.get(_AUTH_SESSION_KEY, "")
-        if isinstance(sid, list):
-            sid = sid[0] if sid else ""
-        return str(sid or "").strip()
-    except Exception:
-        return ""
+    return _get_query_param_one(_AUTH_SESSION_KEY)
 
 
 def _write_sid_to_query(sid: str) -> None:
@@ -68,18 +139,11 @@ def _write_sid_to_query(sid: str) -> None:
     token = str(sid or "").strip()
     if not token:
         return
-    try:
-        st.query_params[_AUTH_SESSION_KEY] = token
-    except Exception:
-        pass
+    _set_query_param(_AUTH_SESSION_KEY, token)
 
 
 def _drop_sid_query() -> None:
-    try:
-        if _AUTH_SESSION_KEY in st.query_params:
-            del st.query_params[_AUTH_SESSION_KEY]
-    except Exception:
-        pass
+    _delete_query_param(_AUTH_SESSION_KEY)
 
 
 def _issue_auth_session(phone: str, user_id: str) -> str:
@@ -200,17 +264,9 @@ def _query_auth_enabled() -> bool:
 def _read_auth_from_query() -> tuple[str, str]:
     if not _query_auth_enabled():
         return "", ""
-    try:
-        qp = st.query_params
-        uid = qp.get("uid", "")
-        phone = qp.get("phone", "")
-        if isinstance(uid, list):
-            uid = uid[0] if uid else ""
-        if isinstance(phone, list):
-            phone = phone[0] if phone else ""
-        return str(uid or "").strip(), str(phone or "").strip()
-    except Exception:
-        return "", ""
+    uid = _get_query_param_one("uid")
+    phone = _get_query_param_one("phone")
+    return uid, phone
 
 
 def _write_auth_to_query(phone: str, user_id: str) -> None:
@@ -222,22 +278,14 @@ def _write_auth_to_query(phone: str, user_id: str) -> None:
     if not uid:
         return
 
-    try:
-        st.query_params["uid"] = uid
-        if ph:
-            st.query_params["phone"] = ph
-    except Exception:
-        pass
+    _set_query_param("uid", uid)
+    if ph:
+        _set_query_param("phone", ph)
 
 
 def _clear_auth_query() -> None:
-    try:
-        if "uid" in st.query_params:
-            del st.query_params["uid"]
-        if "phone" in st.query_params:
-            del st.query_params["phone"]
-    except Exception:
-        pass
+    _delete_query_param("uid")
+    _delete_query_param("phone")
 
 
 def _set_login_state(phone: str, user_id: str, sid: str = "") -> None:
