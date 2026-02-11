@@ -186,6 +186,7 @@ def render_portfolio():
     st.subheader("组合口径：估算收盘 vs 官方净值")
 
     ps = portfolio_gap_summary(days_back=120)
+    latest = None
     if ps["count"] == 0:
         st.info("暂无组合层面的 settled 对比数据。")
     else:
@@ -216,12 +217,13 @@ def render_portfolio():
         st.info("暂无组合误差历史（需要 settled 数据）。")
     else:
         dfp = pd.DataFrame(rows)
-
-        abs_gap = float(latest["abs_gap_pct"])
-        if abs_gap > threshold_p:
-            st.warning(f"⚠️ 组合最近误差 {abs_gap:.4f}% > 阈值 {threshold_p:.2f}%：盘中组合收益可能偏离官方口径。")
-        else:
-            st.success(f"✅ 组合最近误差 {abs_gap:.4f}% ≤ 阈值 {threshold_p:.2f}%：盘中组合口径较稳定。")
+        latest_row = latest if isinstance(latest, dict) else (rows[-1] if rows else None)
+        if isinstance(latest_row, dict):
+            abs_gap = float(latest_row.get("abs_gap_pct", 0.0) or 0.0)
+            if abs_gap > threshold_p:
+                st.warning(f"⚠️ 组合最近误差 {abs_gap:.4f}% > 阈值 {threshold_p:.2f}%：盘中组合收益可能偏离官方口径。")
+            else:
+                st.success(f"✅ 组合最近误差 {abs_gap:.4f}% ≤ 阈值 {threshold_p:.2f}%：盘中组合口径较稳定。")
 
         total_n = len(dfp)
 
@@ -239,8 +241,6 @@ def render_portfolio():
                 value=default_n,
                 step=1,
             )
-
-        dfp_show = dfp.tail(show_n).copy()
 
         dfp_show = dfp.tail(show_n).copy()
 
@@ -586,31 +586,36 @@ def render_portfolio():
         )
 
     if st.button("保存编辑（写入流水）", type="primary", disabled=(is_clearing and not clear_confirmed)):
-
-        apply_position_edit(
-            effective_date=date_str,
-            code=code,
-            shares_end=float(shares_end),
-            avg_cost_nav_end=float(avg_cost),
-            realized_pnl_end=float(realized),
-            note=note,
-        )
-        if amount_end_input is not None:
-            _save_input_amount(date_str, code, amount_end_input)
-        else:
-            _save_input_amount(date_str, code, float(record_amount_input))
-        st.success("已写入流水（adjustments.json），并可回放快照。")
-        st.rerun()
+        try:
+            apply_position_edit(
+                effective_date=date_str,
+                code=code,
+                shares_end=float(shares_end),
+                avg_cost_nav_end=float(avg_cost),
+                realized_pnl_end=float(realized),
+                note=note,
+            )
+            if amount_end_input is not None:
+                _save_input_amount(date_str, code, amount_end_input)
+            else:
+                _save_input_amount(date_str, code, float(record_amount_input))
+            st.success("已写入流水（adjustments.json），并可回放快照。")
+            st.rerun()
+        except Exception as e:
+            st.error(f"保存失败：{e}")
 
     st.divider()
     st.subheader("删除持仓（危险操作）")
     st.caption("删除该基金全部历史流水记录，并清理录入持仓金额。")
     confirm_delete = st.checkbox("我确认删除该基金全部持仓流水", value=False, key=f"confirm_delete_{code}")
     if st.button("删除该基金全部流水", type="secondary", disabled=not confirm_delete):
-        removed = _remove_adjustments_by_code_safe(code)
-        _delete_input_amount_for_code(code)
-        st.success(f"已删除 {code} 的 {removed} 条流水记录。")
-        st.rerun()
+        try:
+            removed = _remove_adjustments_by_code_safe(code)
+            _delete_input_amount_for_code(code)
+            st.success(f"已删除 {code} 的 {removed} 条流水记录。")
+            st.rerun()
+        except Exception as e:
+            st.error(f"删除失败：{e}")
 
 
 render_portfolio()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, date
+from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 from storage import paths
@@ -8,6 +8,7 @@ from storage.json_store import ensure_json_file, update_json
 from domain.position import Position
 from services.estimation_service import estimate_many
 from services.snapshot_service import build_positions_as_of
+from services.trading_time import now_cn
 
 
 def _now_iso() -> str:
@@ -147,7 +148,7 @@ def portfolio_realtime_view_as_of(date_str: Optional[str] = None) -> dict:
     """
     组合实时视图：以流水回放快照为准（推荐）。
     """
-    d = date_str or date.today().isoformat()
+    d = date_str or now_cn().date().isoformat()
 
     snaps = build_positions_as_of(d)
     codes = [s.code for s in snaps]

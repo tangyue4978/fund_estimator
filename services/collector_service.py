@@ -9,6 +9,10 @@ from config import settings
 from storage import paths
 
 
+def _is_web_runtime() -> bool:
+    return bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
+
+
 def _collector_pid_path() -> Path:
     if hasattr(paths, "file_collector_pid"):
         return Path(paths.file_collector_pid())
@@ -86,6 +90,8 @@ def collector_running() -> bool:
 
 
 def start_collector(interval_sec: int) -> tuple[bool, str]:
+    if _is_web_runtime():
+        return False, "disabled_in_web"
     if collector_running():
         return True, "already_running"
     cmd = [
@@ -114,6 +120,8 @@ def start_collector(interval_sec: int) -> tuple[bool, str]:
 
 
 def ensure_collector_running() -> tuple[bool, str]:
+    if _is_web_runtime():
+        return False, "disabled_in_web"
     if not bool(getattr(settings, "COLLECTOR_AUTO_START", True)):
         return False, "auto_start_disabled"
     if collector_running():

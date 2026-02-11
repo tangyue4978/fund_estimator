@@ -34,6 +34,10 @@ def _is_web_runtime() -> bool:
     return bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
 
 
+def _strict_web_cloud_sync() -> bool:
+    return _is_web_runtime() and bool(getattr(settings, "WEB_WATCHLIST_REQUIRE_CLOUD_SYNC", True))
+
+
 def _normalize_code(code: str) -> str:
     raw = str(code or "").strip()
     raw = re.sub(r"\s+", "", raw)
@@ -129,17 +133,32 @@ def _load_remote_items() -> List[str]:
 
 def watchlist_list() -> List[str]:
     local_items = _load_local_items()
+    if _strict_web_cloud_sync() and (not supabase_client.is_enabled()):
+        return []
     if supabase_client.is_enabled():
         try:
             remote_items = _load_remote_items()
+            if _strict_web_cloud_sync():
+                return remote_items
             return _merge_codes(remote_items, local_items)
         except Exception:
+            if _strict_web_cloud_sync():
+                return []
             return local_items
     return local_items
 
 
 def watchlist_add_result(code: str) -> Dict[str, Any]:
     code_n = _normalize_code(code)
+    cloud_enabled = bool(supabase_client.is_enabled())
+    if _strict_web_cloud_sync() and (not cloud_enabled):
+        return {
+            "ok": False,
+            "code": code_n,
+            "items": [],
+            "message": "网页端云端未配置，无法添加自选",
+            "cloud_synced": False,
+        }
     if not _is_valid_code(code_n):
         return {
             "ok": False,
@@ -153,7 +172,7 @@ def watchlist_add_result(code: str) -> Dict[str, Any]:
 
     cloud_synced = False
     cloud_error = ""
-    if supabase_client.is_enabled():
+    if cloud_enabled:
         try:
             uid = _current_user_id()
             exists = supabase_client.get_rows(
@@ -174,7 +193,7 @@ def watchlist_add_result(code: str) -> Dict[str, Any]:
             cloud_error = str(e)
 
     items = watchlist_list()
-    if supabase_client.is_enabled() and (not cloud_synced):
+    if cloud_enabled and (not cloud_synced):
         if _is_web_runtime() and bool(getattr(settings, "WEB_WATCHLIST_REQUIRE_CLOUD_SYNC", True)):
             _remove_local(code_n)
             return {
@@ -199,7 +218,8 @@ def watchlist_add_result(code: str) -> Dict[str, Any]:
         "code": code_n,
         "items": items,
         "message": "已添加",
-        "cloud_synced": True if supabase_client.is_enabled() else False,
+        # Local-only mode should still be treated as successful sync state for UI.
+        "cloud_synced": True if (not cloud_enabled) else cloud_synced,
     }
 
 
@@ -211,11 +231,14 @@ def watchlist_add(code: str) -> dict:
 def watchlist_remove(code: str) -> dict:
     code_n = _normalize_code(code)
     if not code_n:
-        return {"items": watchlist_list(), "updated_at": _now_iso()}
+        return {"ok": True, "items": watchlist_list(), "updated_at": _now_iso()}
 
-    _remove_local(code_n)
+    cloud_enabled = bool(supabase_client.is_enabled())
+    strict_web = _strict_web_cloud_sync()
+    if strict_web and (not cloud_enabled):
+        return {"ok": False, "items": watchlist_list(), "updated_at": _now_iso(), "message": "网页端云端未配置，无法移除自选"}
 
-    if supabase_client.is_enabled():
+    if cloud_enabled:
         try:
             uid = _current_user_id()
             resp = supabase_client.delete_rows(
@@ -227,11 +250,16 @@ def watchlist_remove(code: str) -> dict:
             )
             if resp.status_code not in (200, 204):
                 raise RuntimeError(f"watchlist remove failed({resp.status_code})")
-            return {"items": watchlist_list(), "updated_at": _now_iso()}
+            _remove_local(code_n)
+            return {"ok": True, "items": watchlist_list(), "updated_at": _now_iso()}
         except Exception:
-            return {"items": watchlist_list(), "updated_at": _now_iso()}
+            if strict_web:
+                return {"ok": False, "items": watchlist_list(), "updated_at": _now_iso(), "message": "云端移除失败，请稍后重试"}
+            _remove_local(code_n)
+            return {"ok": True, "items": watchlist_list(), "updated_at": _now_iso()}
 
-    return {"items": watchlist_list(), "updated_at": _now_iso()}
+    _remove_local(code_n)
+    return {"ok": True, "items": watchlist_list(), "updated_at": _now_iso()}
 
 
 # compatibility aliases

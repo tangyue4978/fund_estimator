@@ -74,6 +74,10 @@ def _is_close_window(now: datetime) -> bool:
     return dtime(15, 0) <= t <= dtime(15, 1, 30)
 
 
+def _is_web_runtime() -> bool:
+    return bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
+
+
 def _collector_pid_path() -> Path:
     if hasattr(paths, "file_collector_pid"):
         return Path(paths.file_collector_pid())
@@ -152,6 +156,8 @@ def _collector_running() -> bool:
 
 
 def _start_collector(interval_sec: int, only_trading: bool) -> tuple[bool, str]:
+    if _is_web_runtime():
+        return False, "disabled_in_web"
     if _collector_running():
         return True, "already_running"
     cmd = [
@@ -217,11 +223,12 @@ def render_watchlist():
 
     st.sidebar.header("采样状态")
     running = _collector_running()
+    web_runtime = _is_web_runtime()
     only_trading = True
     interval = int(getattr(settings, "COLLECTOR_TRADING_INTERVAL_SEC", 60) or 60)
     off_interval = int(getattr(settings, "COLLECTOR_OFFMARKET_INTERVAL_SEC", 1800) or 1800)
 
-    if (not running) and bool(getattr(settings, "COLLECTOR_AUTO_START", True)):
+    if (not running) and bool(getattr(settings, "COLLECTOR_AUTO_START", True)) and (not web_runtime):
         ok, msg = _start_collector(interval, False)
         running = ok
         if ok:
@@ -229,10 +236,16 @@ def render_watchlist():
         else:
             st.session_state["_collector_flash"] = {"text": f"采样自动启动失败：{msg}", "icon": "❌"}
 
-    st.sidebar.caption(
-        f"采样状态：{'运行中' if running else '未运行'}。"
-        f"盘中每 {interval}s，非交易时段每 {int(off_interval/60)} 分钟刷新净值。"
-    )
+    if web_runtime:
+        st.sidebar.caption(
+            f"采样状态：{'运行中' if running else '未运行'}。"
+            f"网页版默认使用页面采样；盘中每 {interval}s，非交易时段每 {int(off_interval/60)} 分钟刷新净值。"
+        )
+    else:
+        st.sidebar.caption(
+            f"采样状态：{'运行中' if running else '未运行'}。"
+            f"盘中每 {interval}s，非交易时段每 {int(off_interval/60)} 分钟刷新净值。"
+        )
 
     col1, col2, col3 = st.columns([2, 1, 1])
 
@@ -266,14 +279,14 @@ def render_watchlist():
 
     est_map = estimate_many(codes)
 
-    # Silent page-side sampling write: write after fetch, no toast/rerun.
+    # Silent page-side sampling write (local runtime only): write after fetch, no toast/rerun.
     if "home_last_sample_ts" not in st.session_state:
         st.session_state["home_last_sample_ts"] = {}
     _last_map = st.session_state["home_last_sample_ts"]
     _now = now_cn()
     _last_ts = float(_last_map.get("_all", 0.0) or 0.0)
     _can_sample = (not bool(only_trading)) or is_cn_trading_time(_now)
-    if (not running) and _can_sample and (_now.timestamp() - _last_ts) >= max(30, int(interval)):
+    if (not web_runtime) and (not running) and _can_sample and (_now.timestamp() - _last_ts) >= max(30, int(interval)):
         _ds = _now.date().isoformat()
         for _c, _est in est_map.items():
             if _est:
@@ -311,7 +324,7 @@ def render_watchlist():
                 }
             )
 
-    st.caption(f"更新时间：{datetime.now().isoformat(timespec='seconds')}（本页刷新不会写入日结，仅展示）")
+    st.caption(f"更新时间：{now_cn().isoformat(timespec='seconds')}（本页刷新不会写入日结，仅展示）")
     st.dataframe(rows, width="stretch", hide_index=True)
 
     name_map = {c: ((est_map.get(c).name if est_map.get(c) else '') or f'\u57fa\u91d1{c}') for c in codes}
@@ -339,9 +352,12 @@ def render_watchlist():
     st.subheader("管理自选")
     rm_code = st.selectbox("\u9009\u62e9\u8981\u79fb\u9664\u7684\u4ee3\u7801", options=codes, key="rm_code", format_func=_fmt_code)
     if st.button("移除所选", type="secondary", width="stretch"):
-        watchlist_remove(rm_code)
-        st.toast("已移除", icon="🗑️")
-        st.rerun()
+        res = watchlist_remove(rm_code)
+        if bool(res.get("ok", True)):
+            st.toast("已移除", icon="🗑️")
+            st.rerun()
+        else:
+            st.toast(str(res.get("message", "移除失败")), icon="❌")
 
 
 render_watchlist()

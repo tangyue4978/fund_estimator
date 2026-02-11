@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime
 from typing import List, Optional
@@ -7,6 +8,10 @@ from typing import List, Optional
 from services import supabase_client
 from storage import paths
 from storage.json_store import ensure_json_file, update_json
+
+
+def _strict_web_cloud_mode() -> bool:
+    return bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
 
 
 def _now_iso() -> str:
@@ -37,6 +42,8 @@ def migrate_ui_edit_source(code: Optional[str] = None, effective_date: Optional[
     code = (code or "").strip()
     effective_date = (effective_date or "").strip()
 
+    if _strict_web_cloud_mode() and (not supabase_client.is_enabled()):
+        return 0
     if supabase_client.is_enabled():
         try:
             params = {
@@ -70,7 +77,8 @@ def migrate_ui_edit_source(code: Optional[str] = None, effective_date: Optional[
                     changed += 1
             return changed
         except Exception:
-            pass
+            if _strict_web_cloud_mode():
+                return 0
 
     p = paths.file_adjustments()
     changed = {"count": 0}
@@ -112,6 +120,8 @@ def migrate_ui_edit_source(code: Optional[str] = None, effective_date: Optional[
 
 
 def list_adjustments(code: Optional[str] = None) -> List[dict]:
+    if _strict_web_cloud_mode() and (not supabase_client.is_enabled()):
+        return []
     if supabase_client.is_enabled():
         try:
             params_base = {
@@ -134,7 +144,8 @@ def list_adjustments(code: Optional[str] = None) -> List[dict]:
                 )
             return [x for x in rows if isinstance(x, dict)]
         except Exception:
-            pass
+            if _strict_web_cloud_mode():
+                return []
 
     p = paths.file_adjustments()
     res = ensure_json_file(p)
@@ -193,6 +204,8 @@ def add_adjustment(
         "created_at": _now_iso(),
     }
 
+    if _strict_web_cloud_mode() and (not supabase_client.is_enabled()):
+        raise RuntimeError("cloud storage is not configured")
     if supabase_client.is_enabled():
         try:
             payload = dict(item)
@@ -209,8 +222,9 @@ def add_adjustment(
             if resp.status_code not in (200, 201):
                 raise RuntimeError(f"add adjustment failed({resp.status_code})")
             return {"items": list_adjustments(), "updated_at": _now_iso()}
-        except Exception:
-            pass
+        except Exception as e:
+            if _strict_web_cloud_mode():
+                raise RuntimeError(f"add_adjustment cloud failed: {e}") from e
 
     p = paths.file_adjustments()
 
@@ -231,6 +245,8 @@ def remove_adjustment(adj_id: str) -> dict:
     if not adj_id:
         raise ValueError("adj_id is required")
 
+    if _strict_web_cloud_mode() and (not supabase_client.is_enabled()):
+        raise RuntimeError("cloud storage is not configured")
     if supabase_client.is_enabled():
         try:
             resp = supabase_client.delete_rows(
@@ -240,8 +256,9 @@ def remove_adjustment(adj_id: str) -> dict:
             if resp.status_code not in (200, 204):
                 raise RuntimeError(f"remove adjustment failed({resp.status_code})")
             return {"items": list_adjustments(), "updated_at": _now_iso()}
-        except Exception:
-            pass
+        except Exception as e:
+            if _strict_web_cloud_mode():
+                raise RuntimeError(f"remove_adjustment cloud failed: {e}") from e
 
     p = paths.file_adjustments()
 
@@ -257,6 +274,8 @@ def remove_adjustment(adj_id: str) -> dict:
 
 
 def clear_adjustments() -> None:
+    if _strict_web_cloud_mode() and (not supabase_client.is_enabled()):
+        raise RuntimeError("cloud storage is not configured")
     if supabase_client.is_enabled():
         try:
             resp = supabase_client.delete_rows(
@@ -266,8 +285,9 @@ def clear_adjustments() -> None:
             if resp.status_code not in (200, 204):
                 raise RuntimeError(f"clear adjustments failed({resp.status_code})")
             return
-        except Exception:
-            pass
+        except Exception as e:
+            if _strict_web_cloud_mode():
+                raise RuntimeError(f"clear_adjustments cloud failed: {e}") from e
 
     p = paths.file_adjustments()
 
@@ -284,6 +304,8 @@ def remove_adjustments_by_code(code: str) -> int:
     if not code:
         raise ValueError("code is required")
 
+    if _strict_web_cloud_mode() and (not supabase_client.is_enabled()):
+        raise RuntimeError("cloud storage is not configured")
     if supabase_client.is_enabled():
         try:
             uid = paths.current_user_id()
@@ -298,8 +320,9 @@ def remove_adjustments_by_code(code: str) -> int:
             if resp.status_code not in (200, 204):
                 raise RuntimeError(f"remove by code failed({resp.status_code})")
             return len(rows)
-        except Exception:
-            pass
+        except Exception as e:
+            if _strict_web_cloud_mode():
+                raise RuntimeError(f"remove_adjustments_by_code cloud failed: {e}") from e
 
     p = paths.file_adjustments()
     removed = {"count": 0}
@@ -336,6 +359,8 @@ def remove_adjustments_by_code_date(code: str, effective_date: str, source: Opti
         # Backfill old rows first; otherwise null/manual source rows won't be cleaned.
         migrate_ui_edit_source(code=code, effective_date=effective_date)
 
+    if _strict_web_cloud_mode() and (not supabase_client.is_enabled()):
+        raise RuntimeError("cloud storage is not configured")
     if supabase_client.is_enabled():
         try:
             uid = paths.current_user_id()
@@ -378,8 +403,9 @@ def remove_adjustments_by_code_date(code: str, effective_date: str, source: Opti
             if resp.status_code not in (200, 204):
                 raise RuntimeError(f"remove by code+date failed({resp.status_code})")
             return len(rows)
-        except Exception:
-            pass
+        except Exception as e:
+            if _strict_web_cloud_mode():
+                raise RuntimeError(f"remove_adjustments_by_code_date cloud failed: {e}") from e
 
     p = paths.file_adjustments()
     removed = {"count": 0}

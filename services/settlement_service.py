@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
 try:
@@ -9,13 +10,16 @@ except Exception:  # pragma: no cover
 
 from config import constants
 from datasources.nav_api import fetch_official_nav_for_date
-from services.portfolio_service import position_list
 from services.estimation_service import estimate_many
 from services import supabase_client
 from storage import paths
 from storage.json_store import ensure_json_file, update_json
 
 from services.snapshot_service import build_positions_as_of
+
+
+def _strict_web_cloud_mode() -> bool:
+    return bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
 
 
 def _now_iso() -> str:
@@ -31,6 +35,8 @@ def _today_str() -> str:
 
 
 def _load_ledger() -> dict:
+    if _strict_web_cloud_mode() and (not supabase_client.is_enabled()):
+        return {"items": []}
     if supabase_client.is_enabled():
         try:
             rows = supabase_client.get_rows(
@@ -47,7 +53,8 @@ def _load_ledger() -> dict:
             )
             return {"items": [x for x in rows if isinstance(x, dict)]}
         except Exception:
-            pass
+            if _strict_web_cloud_mode():
+                return {"items": []}
 
     p = paths.file_daily_ledger()
     res = ensure_json_file(p)
@@ -55,6 +62,25 @@ def _load_ledger() -> dict:
     if "items" not in data or not isinstance(data.get("items"), list):
         data["items"] = []
     return data
+
+
+def get_ledger_items() -> list[dict]:
+    ledger = _load_ledger()
+    items = ledger.get("items", [])
+    return items if isinstance(items, list) else []
+
+
+def get_ledger_row(date_str: str, code: str) -> dict:
+    d = str(date_str or "").strip()
+    c = str(code or "").strip()
+    if not d or not c:
+        return {}
+    for it in get_ledger_items():
+        if not isinstance(it, dict):
+            continue
+        if str(it.get("date", "")).strip() == d and str(it.get("code", "")).strip() == c:
+            return it
+    return {}
 
 
 def _find_item_index(items: list, date_str: str, code: str) -> Optional[int]:
@@ -66,14 +92,12 @@ def _find_item_index(items: list, date_str: str, code: str) -> Optional[int]:
 
 def finalize_estimated_close(date_str: Optional[str] = None) -> dict:
     d = date_str or _today_str()
+    if _strict_web_cloud_mode() and (not supabase_client.is_enabled()):
+        raise RuntimeError("cloud storage is not configured")
 
     snapshots = build_positions_as_of(d)
     codes = [s.code for s in snapshots]
 
-    if not codes:
-        return _load_ledger()
-
-    est_map = estimate_many(codes)
     if supabase_client.is_enabled():
         try:
             uid = paths.current_user_id()
@@ -89,10 +113,44 @@ def finalize_estimated_close(date_str: Optional[str] = None) -> dict:
                     ),
                 },
             )
+            existing_rows = [x for x in existing_rows if isinstance(x, dict)]
+            code_set = set(codes)
+
+            # Keep ledger rows strictly aligned to current snapshot codes for this date.
+            if not code_set:
+                if existing_rows:
+                    resp = supabase_client.delete_rows(
+                        "app_daily_ledger",
+                        {"user_id": f"eq.{uid}", "date": f"eq.{d}"},
+                    )
+                    if resp.status_code not in (200, 204):
+                        raise RuntimeError(f"finalize cleanup failed({resp.status_code})")
+                return _load_ledger()
+
+            stale_codes = sorted(
+                {
+                    str(r.get("code", "")).strip()
+                    for r in existing_rows
+                    if str(r.get("code", "")).strip() and str(r.get("code", "")).strip() not in code_set
+                }
+            )
+            for stale_code in stale_codes:
+                resp = supabase_client.delete_rows(
+                    "app_daily_ledger",
+                    {
+                        "user_id": f"eq.{uid}",
+                        "date": f"eq.{d}",
+                        "code": f"eq.{stale_code}",
+                    },
+                )
+                if resp.status_code not in (200, 204):
+                    raise RuntimeError(f"finalize stale cleanup failed({resp.status_code})")
+
+            est_map = estimate_many(codes)
             existing_map = {
                 (str(r.get("date")), str(r.get("code"))): r
                 for r in existing_rows
-                if isinstance(r, dict)
+                if str(r.get("code", "")).strip() in code_set
             }
             upserts = []
             for s in snapshots:
@@ -139,8 +197,28 @@ def finalize_estimated_close(date_str: Optional[str] = None) -> dict:
                 if resp.status_code not in (200, 201):
                     raise RuntimeError(f"finalize upsert failed({resp.status_code})")
             return _load_ledger()
-        except Exception:
-            pass
+        except Exception as e:
+            if _strict_web_cloud_mode():
+                raise RuntimeError(f"finalize_estimated_close cloud failed: {e}") from e
+
+    if not codes:
+        ledger_path = paths.file_daily_ledger()
+
+        def cleaner(data: dict):
+            items = data.get("items", [])
+            if not isinstance(items, list):
+                items = []
+            data["items"] = [
+                it
+                for it in items
+                if str(it.get("date", "")).strip() != d
+            ]
+            data["updated_at"] = _now_iso()
+            return data
+
+        return update_json(ledger_path, cleaner)
+
+    est_map = estimate_many(codes)
 
     ledger_path = paths.file_daily_ledger()
 
@@ -148,6 +226,16 @@ def finalize_estimated_close(date_str: Optional[str] = None) -> dict:
         items = data.get("items", [])
         if not isinstance(items, list):
             items = []
+        code_set = set(codes)
+        # Keep ledger rows strictly aligned to current snapshot codes for this date.
+        items = [
+            it
+            for it in items
+            if not (
+                str(it.get("date", "")).strip() == d
+                and str(it.get("code", "")).strip() not in code_set
+            )
+        ]
 
         for s in snapshots:
             est = est_map.get(s.code)
@@ -202,6 +290,8 @@ def settle_day(date_str: str) -> Tuple[dict, int]:
     - 严格 nav_date == date_str 才覆盖
     - official_pnl 与 estimated_pnl 口径一致（包含 realized_pnl_end）
     """
+    if _strict_web_cloud_mode() and (not supabase_client.is_enabled()):
+        raise RuntimeError("cloud storage is not configured")
     if supabase_client.is_enabled():
         try:
             uid = paths.current_user_id()
@@ -256,8 +346,9 @@ def settle_day(date_str: str) -> Tuple[dict, int]:
                 if resp.status_code not in (200, 201):
                     raise RuntimeError(f"settle upsert failed({resp.status_code})")
             return _load_ledger(), settled
-        except Exception:
-            pass
+        except Exception as e:
+            if _strict_web_cloud_mode():
+                raise RuntimeError(f"settle_day cloud failed: {e}") from e
 
     ledger_path = paths.file_daily_ledger()
 

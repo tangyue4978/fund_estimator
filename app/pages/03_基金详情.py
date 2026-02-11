@@ -16,14 +16,13 @@ try:
     from streamlit_autorefresh import st_autorefresh
 except Exception:  # pragma: no cover
     st_autorefresh = None
-from datetime import date, datetime, timedelta
 
 from services.watchlist_service import watchlist_list
 from services.estimation_service import estimate_one
 from services.intraday_service import intraday_load_fund_series, record_intraday_point
 from services.trading_time import now_cn, is_cn_trading_time
 from services.history_service import fund_history
-from storage.json_store import load_json
+from services.settlement_service import get_ledger_row
 from storage import paths
 from services.auth_guard import require_login
 from services.accuracy_service import fund_gap_summary, guess_gap_reasons, fund_gap_table
@@ -180,13 +179,13 @@ def _collector_running() -> bool:
     except Exception:
         return False
 
+
+def _is_web_runtime() -> bool:
+    return bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
+
+
 def _read_ledger_status(code: str, date_str: str) -> dict:
-    data = load_json(paths.file_daily_ledger(), fallback={"items": []})
-    items = data.get("items", [])
-    for it in items:
-        if str(it.get("code")) == code and str(it.get("date")) == date_str:
-            return it
-    return {}
+    return get_ledger_row(date_str, code)
 
 
 def render():
@@ -198,7 +197,11 @@ def render():
         return
 
     # --- top: realtime quote ---
-    est = estimate_one(code)
+    try:
+        est = estimate_one(code)
+    except Exception:
+        est = None
+        st.error("估值获取失败，请稍后刷新重试。")
     c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 2])
     with c1:
         st.metric("名称", est.name if est else f"基金{code}")
@@ -221,7 +224,7 @@ def render():
         _last_map = st.session_state["detail_last_sample_ts"]
         _now = now_cn()
         _last_ts = float(_last_map.get(code, 0.0) or 0.0)
-        if (not _collector_running()) and is_cn_trading_time(_now) and ((_now.timestamp() - _last_ts) >= max(30, int(_refresh_sec))):
+        if (not _is_web_runtime()) and (not _collector_running()) and is_cn_trading_time(_now) and ((_now.timestamp() - _last_ts) >= max(30, int(_refresh_sec))):
             record_intraday_point(target=code, estimate=est, date_str=_now.date().isoformat())
             _last_map[code] = _now.timestamp()
             st.session_state["detail_last_sample_ts"] = _last_map
@@ -297,10 +300,6 @@ def render():
             f"conf={last.get('confidence')} | "
             f"marker={last.get('marker')}"
         )
-
-        # 最近一条
-        last = intraday[-1]
-        st.caption(f"最近：t={last.get('t')} est_nav={last.get('est_nav')} pct={last.get('est_change_pct')} method={last.get('method')} conf={last.get('confidence')}")
 
     st.divider()
 
@@ -418,7 +417,7 @@ def render():
 
     # --- coverage status explanation ---
     st.subheader("当天收益覆盖状态（estimated_only vs settled）")
-    d = st.date_input("选择日期查看覆盖状态", value=date.today())
+    d = st.date_input("选择日期查看覆盖状态", value=now_cn().date())
     ds = d.isoformat()
     row = _read_ledger_status(code, ds)
 
