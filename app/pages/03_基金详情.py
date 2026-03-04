@@ -16,9 +16,10 @@ except Exception:  # pragma: no cover
     st_autorefresh = None
 
 from services.watchlist_service import watchlist_list
+from services.cloud_status_service import get_cloud_error
 from services.estimation_service import estimate_one
 from services.intraday_service import intraday_load_fund_series
-from services.trading_time import now_cn, is_cn_trading_time
+from services.trading_time import now_cn
 from services.history_service import fund_history
 from services.settlement_service import get_ledger_row
 from services.auth_guard import require_login
@@ -47,8 +48,10 @@ def _apply_silent_autorefresh_style() -> None:
 # auto refresh
 _auto_on = bool(getattr(settings, "FUND_DETAIL_AUTO_REFRESH_ENABLED", True))
 _refresh_raw = getattr(settings, "FUND_DETAIL_AUTO_REFRESH_SEC", 30)
-_refresh_sec = int(30 if _refresh_raw is None else _refresh_raw)
-_refresh_sec = 60 if is_cn_trading_time(now_cn()) else 30 * 60
+try:
+    _refresh_sec = int(30 if _refresh_raw is None else _refresh_raw)
+except Exception:
+    _refresh_sec = 30
 if _auto_on and _refresh_sec > 0:
     _apply_silent_autorefresh_style()
     if st_autorefresh is not None:
@@ -142,6 +145,12 @@ def _read_ledger_status(code: str, date_str: str) -> dict:
 
 def render():
     st.title("基金详情")
+    watchlist_err = get_cloud_error("watchlist")
+    daily_ledger_err = get_cloud_error("daily_ledger")
+    if watchlist_err:
+        st.warning(f"自选列表读取失败，基金选择器可能不完整：{watchlist_err}")
+    if daily_ledger_err:
+        st.warning(f"历史/日结数据读取失败，误差分析和历史净值可能为空：{daily_ledger_err}")
 
     code = _pick_code_from_query_or_select()
     if not code:

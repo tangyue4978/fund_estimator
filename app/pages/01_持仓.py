@@ -17,6 +17,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from services.portfolio_service import portfolio_realtime_view_as_of
+from services.cloud_status_service import get_cloud_error
 from services.edit_bridge_service import apply_position_edit
 from services.snapshot_service import build_positions_as_of
 from services.watchlist_service import watchlist_list
@@ -25,10 +26,8 @@ from services.fund_service import get_fund_profile
 from services.estimation_service import estimate_one
 from services.history_service import get_fund_cumulative_pnl_on
 from services import adjustment_service
-from storage import paths
 from services.auth_guard import require_login
-from services.trading_time import now_cn, is_cn_trading_time
-from storage.json_store import load_json, update_json
+from services.trading_time import now_cn
 from config import settings
 
 
@@ -52,77 +51,16 @@ def _apply_silent_autorefresh_style() -> None:
 # auto refresh (Portfolio)
 _portfolio_auto_on = bool(getattr(settings, "PORTFOLIO_AUTO_REFRESH_ENABLED", True))
 _portfolio_refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC", 30)
-_portfolio_refresh_sec = int(30 if _portfolio_refresh_raw is None else _portfolio_refresh_raw)
-_portfolio_refresh_sec = 60 if is_cn_trading_time(now_cn()) else 30 * 60
+try:
+    _portfolio_refresh_sec = int(30 if _portfolio_refresh_raw is None else _portfolio_refresh_raw)
+except Exception:
+    _portfolio_refresh_sec = 30
 if _portfolio_auto_on and _portfolio_refresh_sec > 0:
     _apply_silent_autorefresh_style()
     if st_autorefresh is not None:
         st_autorefresh(interval=int(_portfolio_refresh_sec) * 1000, key="portfolio_autorefresh")
     elif hasattr(st, "autorefresh"):
         st.autorefresh(interval=int(_portfolio_refresh_sec) * 1000, key="portfolio_autorefresh")
-
-
-def _input_amount_path() -> str:
-    return str(paths.user_data_dir() / "position_input_amounts.json")
-
-
-def _load_input_amount_map(date_str: str) -> dict:
-    data = load_json(_input_amount_path(), fallback={"items": {}})
-    items = data.get("items", {}) if isinstance(data, dict) else {}
-    if not isinstance(items, dict):
-        return {}
-
-    # Roll-forward: for each code, use the latest recorded amount on or before date_str.
-    out: dict = {}
-    for d in sorted(items.keys()):
-        if str(d) > str(date_str):
-            continue
-        by_date = items.get(d, {})
-        if not isinstance(by_date, dict):
-            continue
-        for code, amount in by_date.items():
-            try:
-                out[str(code)] = float(amount)
-            except Exception:
-                continue
-    return out
-
-
-def _save_input_amount(date_str: str, code: str, amount: float) -> None:
-    def updater(data: dict):
-        items = data.get("items", {})
-        if not isinstance(items, dict):
-            items = {}
-        by_date = items.get(date_str, {})
-        if not isinstance(by_date, dict):
-            by_date = {}
-        by_date[code] = float(amount)
-        items[date_str] = by_date
-        data["items"] = items
-        return data
-
-    update_json(_input_amount_path(), updater)
-
-
-def _delete_input_amount_for_code(code: str) -> None:
-    code = (code or "").strip()
-    if not code:
-        return
-
-    def updater(data: dict):
-        items = data.get("items", {})
-        if not isinstance(items, dict):
-            items = {}
-        for d, by_date in list(items.items()):
-            if not isinstance(by_date, dict):
-                continue
-            if code in by_date:
-                by_date.pop(code, None)
-            items[d] = by_date
-        data["items"] = items
-        return data
-
-    update_json(_input_amount_path(), updater)
 
 
 def _remove_adjustments_by_code_safe(code: str) -> int:
@@ -133,31 +71,20 @@ def _remove_adjustments_by_code_safe(code: str) -> int:
     if callable(fn):
         return int(fn(code) or 0)
 
-    # fallback for older runtime/module cache
-    removed = {"count": 0}
-    p = paths.file_adjustments()
-
-    def updater(data: dict):
-        items = data.get("items", [])
-        if not isinstance(items, list):
-            items = []
-        new_items = []
-        cnt = 0
-        for it in items:
-            if str(it.get("code", "")).strip() == code:
-                cnt += 1
-            else:
-                new_items.append(it)
-        removed["count"] = cnt
-        data["items"] = new_items
-        return data
-
-    update_json(p, updater)
-    return removed["count"]
+    return 0
 
 
 def render_portfolio():
     st.title("持仓 - 实时估值（按流水回放快照）")
+    portfolio_ledger_err = get_cloud_error("portfolio_ledger")
+    daily_ledger_err = get_cloud_error("daily_ledger")
+    watchlist_err = get_cloud_error("watchlist")
+    if portfolio_ledger_err:
+        st.warning(f"历史日结账本读取失败，过去日期视图可能缺少估值数据：{portfolio_ledger_err}")
+    if daily_ledger_err:
+        st.warning(f"日结数据读取失败，历史收益与误差分析可能为空：{daily_ledger_err}")
+    if watchlist_err:
+        st.warning(f"自选列表读取失败，编辑区候选基金可能不完整：{watchlist_err}")
 
     d = st.date_input("as_of 日期", value=now_cn().date())
     date_str = d.isoformat()
@@ -281,15 +208,11 @@ def render_portfolio():
     st.subheader("明细")
     df_pos = pd.DataFrame(view["positions"])
     if not df_pos.empty:
-        amount_map = _load_input_amount_map(date_str)
         df_pos["fund_name"] = df_pos["code"].apply(
             lambda c: (get_fund_profile(str(c)).name or "").strip() if str(c).strip() else ""
         )
-        # 若当天尚未保存“按金额输入”，则用成本金额回填（份额*成本净值），避免跟实时市值混淆。
         df_pos["input_amount"] = df_pos.apply(
-            lambda r: float(amount_map.get(str(r.get("code", "")), 0.0) or 0.0)
-            if float(amount_map.get(str(r.get("code", "")), 0.0) or 0.0) > 0
-            else float(r.get("shares", 0.0) or 0.0) * float(r.get("avg_cost_nav", 0.0) or 0.0),
+            lambda r: float(r.get("shares", 0.0) or 0.0) * float(r.get("avg_cost_nav", 0.0) or 0.0),
             axis=1,
         )
         if "realized_pnl" in df_pos.columns:
@@ -488,8 +411,7 @@ def render_portfolio():
     cur_shares = float(cur.shares_end) if cur else 0.0
     cur_cost = float(cur.avg_cost_nav_end) if cur else 0.0
     cur_realized = float(cur.realized_pnl_end) if cur else 0.0
-    editor_amount_map = _load_input_amount_map(date_str)
-    default_record_amount = float(editor_amount_map.get(code, cur_shares * cur_cost) or 0.0)
+    default_record_amount = float(cur_shares * cur_cost)
     yday_date_str = (date.fromisoformat(date_str) - timedelta(days=1)).isoformat()
     yday_total_pnl_default = get_fund_cumulative_pnl_on(code, yday_date_str)
     if yday_total_pnl_default is None:
@@ -596,10 +518,6 @@ def render_portfolio():
                 realized_pnl_end=float(realized),
                 note=note,
             )
-            if amount_end_input is not None:
-                _save_input_amount(date_str, code, amount_end_input)
-            else:
-                _save_input_amount(date_str, code, float(record_amount_input))
             st.success("已写入流水（adjustments.json），并可回放快照。")
             st.rerun()
         except Exception as e:
@@ -612,7 +530,6 @@ def render_portfolio():
     if st.button("删除该基金全部流水", type="secondary", disabled=not confirm_delete):
         try:
             removed = _remove_adjustments_by_code_safe(code)
-            _delete_input_amount_for_code(code)
             st.success(f"已删除 {code} 的 {removed} 条流水记录。")
             st.rerun()
         except Exception as e:

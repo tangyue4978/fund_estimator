@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
+from config import constants
+from services.cloud_status_service import clear_cloud_error, set_cloud_error
+from services import supabase_client
 from storage import paths
 from storage.json_store import ensure_json_file, update_json
 from domain.position import Position
@@ -22,6 +25,37 @@ def _load_portfolio_raw() -> dict:
     if "positions" not in data or not isinstance(data.get("positions"), dict):
         data["positions"] = {}
     return data
+
+
+def _load_daily_ledger_map(date_str: str) -> Dict[str, dict]:
+    if not supabase_client.is_enabled():
+        clear_cloud_error("portfolio_ledger")
+        return {}
+    try:
+        rows = supabase_client.get_rows(
+            "app_daily_ledger",
+            params={
+                "user_id": f"eq.{paths.current_user_id()}",
+                "date": f"eq.{date_str}",
+                "select": (
+                    "code,estimated_nav_close,estimated_pnl_close,"
+                    "official_nav,official_pnl,settle_status"
+                ),
+            },
+        )
+    except Exception as e:
+        set_cloud_error("portfolio_ledger", e)
+        return {}
+
+    out: Dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("code", "")).strip()
+        if code:
+            out[code] = row
+    clear_cloud_error("portfolio_ledger")
+    return out
 
 
 # ---------------- 旧：直接维护 portfolio.json（兼容保留） ----------------
@@ -149,6 +183,8 @@ def portfolio_realtime_view_as_of(date_str: Optional[str] = None) -> dict:
     组合实时视图：以流水回放快照为准（推荐）。
     """
     d = date_str or now_cn().date().isoformat()
+    today = now_cn().date().isoformat()
+    use_live_estimate = d == today
 
     snaps = build_positions_as_of(d)
     codes = [s.code for s in snaps]
@@ -163,7 +199,8 @@ def portfolio_realtime_view_as_of(date_str: Optional[str] = None) -> dict:
             "as_of": d,
         }
 
-    est_map = estimate_many(codes)
+    est_map = estimate_many(codes) if use_live_estimate else {}
+    ledger_map = {} if use_live_estimate else _load_daily_ledger_map(d)
 
     rows: List[Dict[str, Any]] = []
     total_cost = 0.0
@@ -172,22 +209,50 @@ def portfolio_realtime_view_as_of(date_str: Optional[str] = None) -> dict:
     covered_value = 0.0
 
     for s in snaps:
-        est = est_map.get(s.code)
-        est_nav = est.est_nav if est else 0.0
-
+        est = None
         shares = float(s.shares_end)
         cost_nav = float(s.avg_cost_nav_end)
         realized = float(s.realized_pnl_end)
-
         cost = shares * cost_nav
-        value = shares * est_nav
-        pnl = value - cost + realized
+
+        if use_live_estimate:
+            est = est_map.get(s.code)
+            est_nav = est.est_nav if est else 0.0
+            value = shares * est_nav
+            pnl = value - cost + realized
+            est_change_pct = est.est_change_pct if est else 0.0
+            method = est.method if est else ""
+            confidence = est.confidence if est else 0.0
+            warning = est.warning if est else "无估值数据"
+            est_time = est.est_time if est else ""
+        else:
+            row = ledger_map.get(s.code, {})
+            status = str(row.get("settle_status", "")).strip()
+            if status == constants.SETTLE_SETTLED and row.get("official_nav") is not None:
+                est_nav = float(row.get("official_nav") or 0.0)
+                pnl = float(row.get("official_pnl") or 0.0)
+                method = "OFFICIAL_CLOSE"
+                confidence = 1.0
+            elif row.get("estimated_nav_close") is not None:
+                est_nav = float(row.get("estimated_nav_close") or 0.0)
+                pnl = float(row.get("estimated_pnl_close") or (shares * est_nav - cost + realized))
+                method = "ESTIMATED_CLOSE"
+                confidence = 0.6
+            else:
+                est_nav = 0.0
+                pnl = value = 0.0
+                method = ""
+                confidence = 0.0
+            value = shares * est_nav
+            est_change_pct = 0.0
+            warning = "" if est_nav > 0 else f"{d} 无日结估值数据"
+            est_time = d
 
         total_cost += cost
         total_value += value
         total_pnl += pnl
 
-        if est and est_nav > 0:
+        if est_nav > 0:
             covered_value += value
 
         rows.append(
@@ -197,11 +262,11 @@ def portfolio_realtime_view_as_of(date_str: Optional[str] = None) -> dict:
                 "avg_cost_nav": cost_nav,
                 "realized_pnl": realized,
                 "est_nav": est_nav,
-                "est_change_pct": (est.est_change_pct if est else 0.0),
-                "method": (est.method if est else ""),
-                "confidence": (est.confidence if est else 0.0),
-                "warning": (est.warning if est else "无估值数据"),
-                "est_time": (est.est_time if est else ""),
+                "est_change_pct": est_change_pct,
+                "method": method,
+                "confidence": confidence,
+                "warning": warning,
+                "est_time": est_time,
                 "est_value": value,
                 "est_pnl": pnl,
                 "est_pnl_pct": (pnl / cost * 100.0) if cost > 0 else 0.0,

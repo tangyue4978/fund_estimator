@@ -19,7 +19,8 @@ except Exception:  # pragma: no cover
     st_autorefresh = None
 
 from services.estimation_service import estimate_many
-from services.trading_time import is_cn_trading_time, now_cn
+from services.cloud_status_service import get_cloud_error
+from services.trading_time import now_cn
 from services.watchlist_service import watchlist_add, watchlist_list, watchlist_remove
 
 try:
@@ -46,7 +47,11 @@ def _apply_silent_autorefresh_style() -> None:
 
 
 def _home_refresh_sec() -> int:
-    return 60 if is_cn_trading_time(now_cn()) else 30 * 60
+    raw = getattr(settings, "HOME_AUTO_REFRESH_SEC", 60)
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return 60
 
 
 if bool(getattr(settings, "HOME_AUTO_REFRESH_ENABLED", True)):
@@ -62,6 +67,9 @@ if bool(getattr(settings, "HOME_AUTO_REFRESH_ENABLED", True)):
 def render_watchlist() -> None:
     st.title("自选基金 - 实时预估")
     st.sidebar.caption("网页版按页面自动刷新展示估值。")
+    watchlist_err = get_cloud_error("watchlist")
+    if watchlist_err:
+        st.warning(f"自选列表读取失败，当前页面可能显示为空数据：{watchlist_err}")
 
     col1, col2, col3 = st.columns([2, 1, 1])
 

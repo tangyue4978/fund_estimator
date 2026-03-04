@@ -1,341 +1,259 @@
 from __future__ import annotations
 
-import hashlib
-import secrets
+import json
 from datetime import datetime, timedelta
+import uuid
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from config import settings
 from services.auth_service import DEFAULT_DEVELOPER, login_user, register_user
 from storage import paths
-from storage.json_store import update_json
+from storage.json_store import ensure_json_file_with_schema, update_json
 
 
-_AUTH_SESSION_KEY = "sid"
-
-
-def _get_query_params_mapping() -> dict[str, list[str]]:
-    # Compatible with both new st.query_params and legacy experimental APIs.
-    try:
-        qp = st.query_params
-        out: dict[str, list[str]] = {}
-        for k in qp.keys():
-            v = qp.get(k, "")
-            if isinstance(v, list):
-                out[str(k)] = [str(x) for x in v if str(x) != ""]
-            else:
-                sv = str(v)
-                out[str(k)] = [sv] if sv != "" else []
-        return out
-    except Exception:
-        pass
-
-    try:
-        raw = st.experimental_get_query_params()
-        out: dict[str, list[str]] = {}
-        if isinstance(raw, dict):
-            for k, v in raw.items():
-                if isinstance(v, list):
-                    out[str(k)] = [str(x) for x in v if str(x) != ""]
-                else:
-                    sv = str(v)
-                    out[str(k)] = [sv] if sv != "" else []
-        return out
-    except Exception:
-        return {}
-
-
-def _get_query_param_one(key: str) -> str:
-    values = _get_query_params_mapping().get(str(key), [])
-    if not values:
-        return ""
-    return str(values[0]).strip()
-
-
-def _set_query_param(key: str, value: str) -> None:
-    k = str(key).strip()
-    v = str(value).strip()
-    if not k or not v:
-        return
-    try:
-        st.query_params[k] = v
-        return
-    except Exception:
-        pass
-
-    try:
-        params = _get_query_params_mapping()
-        params[k] = [v]
-        st.experimental_set_query_params(**params)
-    except Exception:
-        pass
-
-
-def _delete_query_param(key: str) -> None:
-    k = str(key).strip()
-    if not k:
-        return
-    try:
-        if k in st.query_params:
-            del st.query_params[k]
-        return
-    except Exception:
-        pass
-
-    try:
-        params = _get_query_params_mapping()
-        if k in params:
-            params.pop(k, None)
-            st.experimental_set_query_params(**params)
-    except Exception:
-        pass
-
-
-def _persist_login_enabled() -> bool:
-    return bool(getattr(settings, "AUTH_PERSIST_LOGIN_ENABLED", True))
-
-
-def _auth_session_ttl_days() -> int:
-    try:
-        days = int(getattr(settings, "AUTH_SESSION_DAYS", 14))
-    except Exception:
-        days = 14
-    return max(1, days)
+_AUTH_COOKIE_KEY = "fund_estimator_sid"
 
 
 def _now() -> datetime:
     return datetime.now()
 
 
-def _to_iso(dt: datetime) -> str:
-    return dt.isoformat(timespec="seconds")
+def _sessions_path() -> str:
+    return paths.file_auth_sessions()
 
 
-def _parse_iso(value: str) -> datetime | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
+def _sessions_schema() -> dict:
+    return {"sessions": {}}
+
+
+def _session_ttl_days() -> int:
+    raw = getattr(settings, "AUTH_SESSION_DAYS", 14)
     try:
-        return datetime.fromisoformat(raw)
+        return max(1, int(raw))
     except Exception:
-        return None
+        return 14
 
 
-def _hash_session_token(token: str) -> str:
-    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+def _cookie_max_age_sec() -> int:
+    return _session_ttl_days() * 24 * 60 * 60
 
 
-def _read_sid_from_query() -> str:
-    if not _persist_login_enabled():
-        return ""
-    return _get_query_param_one(_AUTH_SESSION_KEY)
-
-
-def _write_sid_to_query(sid: str) -> None:
-    if not _persist_login_enabled():
-        return
-    token = str(sid or "").strip()
-    if not token:
-        return
-    _set_query_param(_AUTH_SESSION_KEY, token)
-
-
-def _drop_sid_query() -> None:
-    _delete_query_param(_AUTH_SESSION_KEY)
-
-
-def _issue_auth_session(phone: str, user_id: str) -> str:
-    token = secrets.token_urlsafe(32)
-    token_hash = _hash_session_token(token)
-    now = _now()
-    expires_at = now + timedelta(days=_auth_session_ttl_days())
-
-    def updater(data: dict) -> dict:
-        items = data.get("items", [])
-        if not isinstance(items, list):
-            items = []
-        kept: list[dict] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            exp = _parse_iso(str(item.get("expires_at", "")))
-            if exp is None or exp <= now:
-                continue
-            kept.append(item)
-        kept.append(
-            {
-                "token_hash": token_hash,
-                "user_id": str(user_id or ""),
-                "phone": str(phone or ""),
-                "created_at": _to_iso(now),
-                "expires_at": _to_iso(expires_at),
-            }
-        )
-        # Keep latest sessions only to avoid unbounded file growth.
-        data["items"] = kept[-1000:]
-        return data
-
-    update_json(paths.file_auth_sessions(), updater)
-    return token
-
-
-def _resolve_auth_session(token: str) -> tuple[str, str]:
-    raw_token = str(token or "").strip()
-    if not raw_token:
-        return "", ""
-
-    target_hash = _hash_session_token(raw_token)
-    now = _now()
-    matched_uid = ""
-    matched_phone = ""
-
-    def updater(data: dict) -> dict:
-        nonlocal matched_uid, matched_phone
-        items = data.get("items", [])
-        if not isinstance(items, list):
-            items = []
-        kept: list[dict] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            exp = _parse_iso(str(item.get("expires_at", "")))
-            if exp is None or exp <= now:
-                continue
-            if str(item.get("token_hash", "")) == target_hash:
-                matched_uid = str(item.get("user_id", "")).strip()
-                matched_phone = str(item.get("phone", "")).strip()
-            kept.append(item)
-        data["items"] = kept
-        return data
-
+def _cookie_secure_attr() -> str:
     try:
-        update_json(paths.file_auth_sessions(), updater)
+        url = str(getattr(st.context, "url", "") or "").strip().lower()
     except Exception:
-        # Fail safe: do not trust token when storage is unavailable.
-        return "", ""
-
-    return matched_uid, matched_phone
+        url = ""
+    return "; Secure" if url.startswith("https://") else ""
 
 
-def _revoke_auth_session(token: str) -> None:
-    raw_token = str(token or "").strip()
-    if not raw_token:
-        return
-
-    target_hash = _hash_session_token(raw_token)
-
-    def updater(data: dict) -> dict:
-        items = data.get("items", [])
-        if not isinstance(items, list):
-            data["items"] = []
-            return data
-        data["items"] = [
-            item
-            for item in items
-            if isinstance(item, dict) and str(item.get("token_hash", "")) != target_hash
-        ]
-        return data
+def _clear_legacy_auth_query_params() -> None:
+    try:
+        qp = st.query_params
+        changed = False
+        for key in ("sid", "uid", "phone"):
+            if key in qp:
+                del qp[key]
+                changed = True
+        if changed:
+            return
+    except Exception:
+        pass
 
     try:
-        update_json(paths.file_auth_sessions(), updater)
+        params = st.experimental_get_query_params()
+        changed = False
+        for key in ("sid", "uid", "phone"):
+            if key in params:
+                params.pop(key, None)
+                changed = True
+        if changed:
+            st.experimental_set_query_params(**params)
     except Exception:
         pass
 
 
-def _restore_login_from_sid() -> tuple[str, str, str]:
-    sid = _read_sid_from_query()
+def _read_sid_from_cookie() -> str:
+    try:
+        cookies = st.context.cookies
+        return str(cookies.get(_AUTH_COOKIE_KEY, "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _clear_expired_sessions() -> None:
+    now_iso = _now().isoformat(timespec="seconds")
+
+    def updater(data: dict) -> dict:
+        sessions = data.get("sessions", {})
+        if not isinstance(sessions, dict):
+            data["sessions"] = {}
+            return data
+        data["sessions"] = {
+            sid: row
+            for sid, row in sessions.items()
+            if isinstance(row, dict) and str(row.get("expires_at", "")).strip() > now_iso
+        }
+        return data
+
+    update_json(_sessions_path(), updater)
+
+
+def _persist_login_session(phone: str, user_id: str) -> str:
+    _clear_expired_sessions()
+    sid = uuid.uuid4().hex
+    now = _now()
+    payload = {
+        "phone": str(phone),
+        "user_id": str(user_id),
+        "created_at": now.isoformat(timespec="seconds"),
+        "updated_at": now.isoformat(timespec="seconds"),
+        "expires_at": (now + timedelta(days=_session_ttl_days())).isoformat(timespec="seconds"),
+    }
+
+    def updater(data: dict) -> dict:
+        sessions = data.get("sessions", {})
+        if not isinstance(sessions, dict):
+            sessions = {}
+        sessions[sid] = payload
+        data["sessions"] = sessions
+        return data
+
+    update_json(_sessions_path(), updater)
+    return sid
+
+
+def _drop_persistent_session() -> None:
+    sid = str(st.session_state.get("auth_session_id") or _read_sid_from_cookie()).strip()
     if not sid:
-        return "", "", ""
-
-    uid, phone = _resolve_auth_session(sid)
-    if not uid:
-        _drop_sid_query()
-        return "", "", ""
-
-    return uid, phone, sid
-
-
-def _query_auth_enabled() -> bool:
-    return bool(getattr(settings, "AUTH_QUERY_LOGIN_ENABLED", False))
-
-
-def _read_auth_from_query() -> tuple[str, str]:
-    if not _query_auth_enabled():
-        return "", ""
-    uid = _get_query_param_one("uid")
-    phone = _get_query_param_one("phone")
-    return uid, phone
-
-
-def _write_auth_to_query(phone: str, user_id: str) -> None:
-    if not _query_auth_enabled():
         return
 
-    uid = str(user_id or "").strip()
-    ph = str(phone or "").strip()
-    if not uid:
+    def updater(data: dict) -> dict:
+        sessions = data.get("sessions", {})
+        if isinstance(sessions, dict):
+            sessions.pop(sid, None)
+            data["sessions"] = sessions
+        return data
+
+    update_json(_sessions_path(), updater)
+
+
+def _queue_cookie_sync(action: str, sid: str = "") -> None:
+    st.session_state["auth_cookie_action"] = action
+    if sid:
+        st.session_state["auth_cookie_value"] = sid
+    else:
+        st.session_state.pop("auth_cookie_value", None)
+
+
+def _render_cookie_sync() -> None:
+    action = str(st.session_state.get("auth_cookie_action", "") or "").strip().lower()
+    sid = str(st.session_state.get("auth_cookie_value", "") or "").strip()
+    if action not in {"set", "clear"}:
         return
 
-    _set_query_param("uid", uid)
-    if ph:
-        _set_query_param("phone", ph)
+    if action == "set" and sid:
+        cookie_stmt = (
+            f'document.cookie = "{_AUTH_COOKIE_KEY}=" + encodeURIComponent({json.dumps(sid)}) + '
+            f'"; path=/; max-age={_cookie_max_age_sec()}; SameSite=Lax{_cookie_secure_attr()}";'
+        )
+    else:
+        cookie_stmt = (
+            f'document.cookie = "{_AUTH_COOKIE_KEY}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; '
+            f'SameSite=Lax{_cookie_secure_attr()}";'
+        )
+
+    components.html(
+        f"""
+<script>
+{cookie_stmt}
+</script>
+""",
+        height=0,
+        width=0,
+    )
+    st.session_state.pop("auth_cookie_action", None)
+    st.session_state.pop("auth_cookie_value", None)
 
 
-def _clear_auth_query() -> None:
-    _delete_query_param("uid")
-    _delete_query_param("phone")
-
-
-def _set_login_state(phone: str, user_id: str, sid: str = "") -> None:
+def _set_login_state(phone: str, user_id: str, *, persist: bool = True, sid: str = "") -> None:
     st.session_state["auth_logged_in"] = True
     st.session_state["auth_phone"] = str(phone)
     st.session_state["auth_user_id"] = str(user_id)
-    st.session_state["auth_sid"] = str(sid or "")
     st.session_state["fund_estimator_user_id"] = str(user_id)
     paths.set_active_user(str(user_id))
-    _write_auth_to_query(phone, user_id)
-    if sid:
-        _write_sid_to_query(sid)
+
+    auth_sid = sid.strip()
+    if persist and bool(getattr(settings, "AUTH_PERSIST_LOGIN_ENABLED", True)):
+        auth_sid = _persist_login_session(phone, user_id)
+    if auth_sid:
+        st.session_state["auth_session_id"] = auth_sid
+        _queue_cookie_sync("set", auth_sid)
+
+
+def _restore_login_from_session() -> bool:
+    if not bool(getattr(settings, "AUTH_PERSIST_LOGIN_ENABLED", True)):
+        return False
+
+    sid = _read_sid_from_cookie()
+    if not sid:
+        return False
+
+    data = ensure_json_file_with_schema(_sessions_path(), _sessions_schema())
+    sessions = data.get("sessions", {})
+    if not isinstance(sessions, dict):
+        return False
+
+    row = sessions.get(sid)
+    now_iso = _now().isoformat(timespec="seconds")
+    if not isinstance(row, dict) or str(row.get("expires_at", "")).strip() <= now_iso:
+        _queue_cookie_sync("clear")
+        _drop_persistent_session()
+        return False
+
+    def updater(data: dict) -> dict:
+        cur = data.get("sessions", {}).get(sid)
+        if isinstance(cur, dict):
+            cur["updated_at"] = now_iso
+            cur["expires_at"] = (_now() + timedelta(days=_session_ttl_days())).isoformat(timespec="seconds")
+            data["sessions"][sid] = cur
+        return data
+
+    update_json(_sessions_path(), updater)
+    _set_login_state(str(row.get("phone", "")), str(row.get("user_id", "")), persist=False, sid=sid)
+    _queue_cookie_sync("set", sid)
+    return True
 
 
 def _is_logged_in() -> bool:
     logged = bool(st.session_state.get("auth_logged_in"))
     uid = str(st.session_state.get("auth_user_id", "")).strip()
     if logged and uid:
-        sid = str(st.session_state.get("auth_sid", "")).strip()
-        if sid:
-            _write_sid_to_query(sid)
         paths.set_active_user(uid)
         st.session_state["fund_estimator_user_id"] = uid
         return True
-
-    sid_uid, sid_phone, sid_token = _restore_login_from_sid()
-    if sid_uid:
-        _set_login_state(sid_phone, sid_uid, sid=sid_token)
-        return True
-
-    # Optional compatibility mode for old deployments.
-    uid_q, phone_q = _read_auth_from_query()
-    if uid_q:
-        sid = _issue_auth_session(phone_q, uid_q) if _persist_login_enabled() else ""
-        _set_login_state(phone_q, uid_q, sid=sid)
-        return True
-
     return False
 
 
 def logout() -> None:
-    sid = str(st.session_state.get("auth_sid", "")).strip() or _read_sid_from_query()
-    _revoke_auth_session(sid)
-    for k in ("auth_logged_in", "auth_phone", "auth_user_id", "auth_sid", "fund_estimator_user_id"):
-        st.session_state.pop(k, None)
+    _drop_persistent_session()
+    for key in (
+        "auth_logged_in",
+        "auth_phone",
+        "auth_user_id",
+        "fund_estimator_user_id",
+        "auth_session_id",
+    ):
+        st.session_state.pop(key, None)
     paths.set_active_user("public")
-    _drop_sid_query()
-    _clear_auth_query()
+    _queue_cookie_sync("clear")
+    _clear_legacy_auth_query_params()
 
 
 def require_login() -> str:
+    _clear_legacy_auth_query_params()
+    _render_cookie_sync()
     if _is_logged_in():
         phone = str(st.session_state.get("auth_phone", ""))
         with st.sidebar:
@@ -344,6 +262,11 @@ def require_login() -> str:
                 logout()
                 st.rerun()
         return str(st.session_state.get("auth_user_id"))
+
+    ensure_json_file_with_schema(_sessions_path(), _sessions_schema())
+    if _restore_login_from_session():
+        st.rerun()
+    _render_cookie_sync()
 
     st.title("欢迎使用 Fund Estimator")
     st.info("请先注册或登录后再使用系统功能。")
@@ -357,8 +280,7 @@ def require_login() -> str:
         if submitted:
             ok, msg, user_id = login_user(phone, password)
             if ok and user_id:
-                sid = _issue_auth_session(phone, user_id) if _persist_login_enabled() else ""
-                _set_login_state(phone, user_id, sid=sid)
+                _set_login_state(phone, user_id)
                 st.success("登录成功")
                 st.rerun()
             st.error(msg)
@@ -376,8 +298,7 @@ def require_login() -> str:
             else:
                 ok, msg, user_id = register_user(phone, password)
                 if ok and user_id:
-                    sid = _issue_auth_session(phone, user_id) if _persist_login_enabled() else ""
-                    _set_login_state(phone, user_id, sid=sid)
+                    _set_login_state(phone, user_id)
                     st.success("注册并登录成功")
                     st.rerun()
                 st.error(msg)

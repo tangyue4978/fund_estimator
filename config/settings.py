@@ -54,6 +54,6 @@ SILENT_AUTO_REFRESH_UI = True
 # Security: do not trust uid/phone in URL query to restore login on web.
 AUTH_QUERY_LOGIN_ENABLED = False
 
-# Keep web login after browser refresh via short-lived session id in query params.
+# Persist web login by storing a session id in browser cookie, not in URL.
 AUTH_PERSIST_LOGIN_ENABLED = True
 AUTH_SESSION_DAYS = 14

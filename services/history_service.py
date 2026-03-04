@@ -1,45 +1,37 @@
 from __future__ import annotations
 
-import os
 from datetime import timedelta
 from typing import Dict, List, Optional
 
 from config import constants
+from services.cloud_status_service import clear_cloud_error, set_cloud_error
 from services import supabase_client
 from services.trading_time import now_cn
 from storage import paths
-from storage.json_store import ensure_json_file
-
-
-def _strict_web_cloud_mode() -> bool:
-    return bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
 
 
 def _load_ledger_items() -> List[dict]:
-    if _strict_web_cloud_mode() and (not supabase_client.is_enabled()):
+    if not supabase_client.is_enabled():
+        clear_cloud_error("daily_ledger")
         return []
-    if supabase_client.is_enabled():
-        try:
-            rows = supabase_client.get_rows(
-                "app_daily_ledger",
-                params={
-                    "user_id": f"eq.{paths.current_user_id()}",
-                    "select": (
-                        "date,code,shares_end,avg_cost_nav_end,realized_pnl_end,"
-                        "estimated_nav_close,estimated_pnl_close,official_nav,official_pnl,settle_status"
-                    ),
-                    "order": "date.asc,code.asc",
-                },
-            )
-            return [x for x in rows if isinstance(x, dict)]
-        except Exception:
-            if _strict_web_cloud_mode():
-                return []
-
-    res = ensure_json_file(paths.file_daily_ledger())
-    data = res.data if isinstance(res.data, dict) else {}
-    items = data.get("items", [])
-    return items if isinstance(items, list) else []
+    try:
+        rows = supabase_client.get_rows(
+            "app_daily_ledger",
+            params={
+                "user_id": f"eq.{paths.current_user_id()}",
+                "select": (
+                    "date,code,shares_end,avg_cost_nav_end,realized_pnl_end,"
+                    "estimated_nav_close,estimated_pnl_close,official_nav,official_pnl,settle_status"
+                ),
+                "order": "date.asc,code.asc",
+            },
+        )
+        items = [x for x in rows if isinstance(x, dict)]
+        clear_cloud_error("daily_ledger")
+        return items
+    except Exception as e:
+        set_cloud_error("daily_ledger", e)
+        return []
 
 
 def get_fund_cumulative_pnl_on(code: str, date_str: str) -> Optional[float]:
@@ -53,14 +45,12 @@ def get_fund_cumulative_pnl_on(code: str, date_str: str) -> Optional[float]:
             continue
         if str(it.get("date", "")).strip() != date_str:
             continue
-
         status = str(it.get("settle_status", "")).strip()
         if status == constants.SETTLE_SETTLED and it.get("official_pnl") is not None:
             try:
                 return float(it.get("official_pnl"))
             except Exception:
                 pass
-
         if it.get("estimated_pnl_close") is not None:
             try:
                 return float(it.get("estimated_pnl_close"))
@@ -85,11 +75,9 @@ def get_history(code: str, days: int = 90) -> List[dict]:
     for it in _load_ledger_items():
         if str(it.get("code")) != code:
             continue
-
         d = str(it.get("date"))
         if d < start or d > end:
             continue
-
         status = str(it.get("settle_status", constants.SETTLE_ESTIMATED_ONLY))
         if status == constants.SETTLE_SETTLED and it.get("official_nav") is not None:
             rows.append({"date": d, "nav": float(it["official_nav"]), "source": "official", "settle_status": status})
@@ -118,7 +106,6 @@ def get_portfolio_history(days: int = 90) -> List[dict]:
     out: List[dict] = []
     for d, lst in by_date.items():
         all_settled = all(x.get("settle_status") == constants.SETTLE_SETTLED for x in lst)
-
         total_cost = 0.0
         total_value = 0.0
         total_pnl = 0.0
@@ -127,18 +114,11 @@ def get_portfolio_history(days: int = 90) -> List[dict]:
             shares = float(it.get("shares_end", 0.0) or 0.0)
             cost_nav = float(it.get("avg_cost_nav_end", 0.0) or 0.0)
             realized = float(it.get("realized_pnl_end", 0.0) or 0.0)
-
             cost = shares * cost_nav
             total_cost += cost
-
-            if all_settled and it.get("official_nav") is not None:
-                nav = float(it["official_nav"])
-            else:
-                nav = float(it.get("estimated_nav_close", 0.0) or 0.0)
-
+            nav = float(it["official_nav"]) if all_settled and it.get("official_nav") is not None else float(it.get("estimated_nav_close", 0.0) or 0.0)
             value = shares * nav
             pnl = value - cost + realized
-
             total_value += value
             total_pnl += pnl
 
@@ -158,11 +138,12 @@ def get_portfolio_history(days: int = 90) -> List[dict]:
     return out
 
 
-def fund_history(code: str, days_back: int = 60):
+def fund_history(code: str, days_back: int = 60) -> List[dict]:
     code = (code or "").strip()
     if not code:
         return []
     try:
         return get_history(code, days=max(1, int(days_back)))
-    except Exception:
+    except Exception as e:
+        set_cloud_error("daily_ledger", e)
         return []

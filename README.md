@@ -14,9 +14,12 @@ This branch is the web-only version of Fund Estimator.
 1. Push this repo to GitHub.
 2. Create a new app in Streamlit Community Cloud.
 3. Set the main file path to `app/Home.py`.
+4. Configure `SUPABASE_URL` and `SUPABASE_KEY` in Streamlit secrets before first login.
 
 ## Notes
 
 - This branch keeps only the online web app.
 - Local packaging, desktop launcher, and mobile shell have been split to branch `local-packaging`.
-- If Supabase secrets are configured, auth and online data sync use Supabase.
+- Supabase is required for auth, watchlist sync, adjustments, and daily ledger data.
+- Set `SUPABASE_URL` and `SUPABASE_KEY` in `.streamlit/secrets.toml` for local development.
+- Browser refresh keeps login via a browser cookie backed by a server-side session store; the session id is no longer placed in the URL.

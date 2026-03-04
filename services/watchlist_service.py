@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from services import supabase_client
+from services.cloud_status_service import clear_cloud_error, set_cloud_error
 from services.estimation_service import estimate_many
 from services.fund_service import get_fund_profile
 from storage import paths
@@ -61,10 +62,14 @@ def _load_remote_items() -> List[str]:
 
 def watchlist_list() -> List[str]:
     if not supabase_client.is_enabled():
+        clear_cloud_error("watchlist")
         return []
     try:
-        return _load_remote_items()
-    except Exception:
+        items = _load_remote_items()
+        clear_cloud_error("watchlist")
+        return items
+    except Exception as e:
+        set_cloud_error("watchlist", e)
         return []
 
 
@@ -102,12 +107,13 @@ def watchlist_add_result(code: str) -> Dict[str, Any]:
             resp = supabase_client.insert_row("app_watchlist", {"user_id": uid, "code": code_n})
             if resp.status_code not in (200, 201, 409):
                 raise RuntimeError(f"watchlist add failed({resp.status_code})")
-    except Exception:
+    except Exception as e:
+        set_cloud_error("watchlist", e)
         return {
             "ok": False,
             "code": code_n,
             "items": watchlist_list(),
-            "message": "云端同步失败，请稍后重试",
+            "message": f"云端同步失败，请稍后重试：{e}",
             "cloud_synced": False,
         }
 
@@ -144,8 +150,9 @@ def watchlist_remove(code: str) -> dict:
         if resp.status_code not in (200, 204):
             raise RuntimeError(f"watchlist remove failed({resp.status_code})")
         return {"ok": True, "items": watchlist_list(), "updated_at": _now_iso()}
-    except Exception:
-        return {"ok": False, "items": watchlist_list(), "updated_at": _now_iso(), "message": "云端移除失败，请稍后重试"}
+    except Exception as e:
+        set_cloud_error("watchlist", e)
+        return {"ok": False, "items": watchlist_list(), "updated_at": _now_iso(), "message": f"云端移除失败，请稍后重试：{e}"}
 
 
 def list_watchlist() -> List[str]:
@@ -171,13 +178,11 @@ def watchlist_realtime_view() -> List[Dict[str, Any]]:
 
     est_map = estimate_many(codes)
     profiles = {c: get_fund_profile(c) for c in codes}
-
     rows: List[Dict[str, Any]] = []
     for code in codes:
         est = est_map.get(code)
         profile = profiles.get(code)
         name = (profile.name if profile else "") or (est.name if est else "") or code
-
         if not est:
             rows.append(
                 {
@@ -193,7 +198,6 @@ def watchlist_realtime_view() -> List[Dict[str, Any]]:
                 }
             )
             continue
-
         rows.append(
             {
                 "code": code,
@@ -207,5 +211,4 @@ def watchlist_realtime_view() -> List[Dict[str, Any]]:
                 "suggested_refresh_sec": est.suggested_refresh_sec,
             }
         )
-
     return rows
