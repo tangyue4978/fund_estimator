@@ -8,7 +8,6 @@ import streamlit as st
 
 from config import settings
 from services.auth_service import DEFAULT_DEVELOPER, login_user, register_user
-from services.collector_service import ensure_collector_running
 from storage import paths
 from storage.json_store import update_json
 
@@ -298,10 +297,6 @@ def _set_login_state(phone: str, user_id: str, sid: str = "") -> None:
     _write_auth_to_query(phone, user_id)
     if sid:
         _write_sid_to_query(sid)
-    try:
-        ensure_collector_running()
-    except Exception:
-        pass
 
 
 def _is_logged_in() -> bool:
@@ -313,10 +308,6 @@ def _is_logged_in() -> bool:
             _write_sid_to_query(sid)
         paths.set_active_user(uid)
         st.session_state["fund_estimator_user_id"] = uid
-        try:
-            ensure_collector_running()
-        except Exception:
-            pass
         return True
 
     sid_uid, sid_phone, sid_token = _restore_login_from_sid()

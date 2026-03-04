@@ -1,6 +1,4 @@
 import sys
-import os
-import subprocess
 from pathlib import Path
 
 import pandas as pd
@@ -19,11 +17,10 @@ except Exception:  # pragma: no cover
 
 from services.watchlist_service import watchlist_list
 from services.estimation_service import estimate_one
-from services.intraday_service import intraday_load_fund_series, record_intraday_point
+from services.intraday_service import intraday_load_fund_series
 from services.trading_time import now_cn, is_cn_trading_time
 from services.history_service import fund_history
 from services.settlement_service import get_ledger_row
-from storage import paths
 from services.auth_guard import require_login
 from services.accuracy_service import fund_gap_summary, guess_gap_reasons, fund_gap_table
 from services.fund_service import get_fund_profile
@@ -48,13 +45,10 @@ def _apply_silent_autorefresh_style() -> None:
 
 
 # auto refresh
-_web_runtime = bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
 _auto_on = bool(getattr(settings, "FUND_DETAIL_AUTO_REFRESH_ENABLED", True))
 _refresh_raw = getattr(settings, "FUND_DETAIL_AUTO_REFRESH_SEC", 30)
 _refresh_sec = int(30 if _refresh_raw is None else _refresh_raw)
-if _web_runtime:
-    _auto_on = _auto_on
-    _refresh_sec = 60 if is_cn_trading_time(now_cn()) else 30 * 60
+_refresh_sec = 60 if is_cn_trading_time(now_cn()) else 30 * 60
 if _auto_on and _refresh_sec > 0:
     _apply_silent_autorefresh_style()
     if st_autorefresh is not None:
@@ -142,52 +136,6 @@ def _filter_trading_session(points: list) -> list:
     return out
 
 
-def _collector_running() -> bool:
-    try:
-        if hasattr(paths, "file_collector_pid"):
-            p = Path(paths.file_collector_pid())
-        elif hasattr(paths, "status_dir"):
-            uid = str(paths.current_user_id()).strip() or "public"
-            p = Path(paths.status_dir()) / f"collector_{uid}.pid"
-        elif hasattr(paths, "runtime_root"):
-            uid = str(paths.current_user_id()).strip() or "public"
-            p = Path(paths.runtime_root()) / "status" / f"collector_{uid}.pid"
-        else:
-            uid = "public"
-            p = PROJECT_ROOT / "storage" / "status" / f"collector_{uid}.pid"
-        raw = p.read_text(encoding="utf-8").strip()
-        pid = int(raw) if raw else 0
-    except Exception:
-        return False
-
-    if pid <= 0:
-        return False
-
-    if os.name == "nt":
-        try:
-            proc = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                check=False,
-            )
-            out = (proc.stdout or "").strip()
-            return bool(out) and (not out.upper().startswith("INFO:")) and (f'"{pid}"' in out)
-        except Exception:
-            return False
-
-    try:
-        os.kill(pid, 0)
-        return True
-    except Exception:
-        return False
-
-
-def _is_web_runtime() -> bool:
-    return bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
-
-
 def _read_ledger_status(code: str, date_str: str) -> dict:
     return get_ledger_row(date_str, code)
 
@@ -220,18 +168,6 @@ def render():
 
     if est and est.warning:
         st.warning(est.warning)
-
-    # Silent page-side sampling write: write after fetch, no toast/rerun.
-    if est:
-        if "detail_last_sample_ts" not in st.session_state:
-            st.session_state["detail_last_sample_ts"] = {}
-        _last_map = st.session_state["detail_last_sample_ts"]
-        _now = now_cn()
-        _last_ts = float(_last_map.get(code, 0.0) or 0.0)
-        if (not _is_web_runtime()) and (not _collector_running()) and is_cn_trading_time(_now) and ((_now.timestamp() - _last_ts) >= max(30, int(_refresh_sec))):
-            record_intraday_point(target=code, estimate=est, date_str=_now.date().isoformat())
-            _last_map[code] = _now.timestamp()
-            st.session_state["detail_last_sample_ts"] = _last_map
 
     st.divider()
 

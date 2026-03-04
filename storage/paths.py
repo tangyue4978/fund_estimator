@@ -1,4 +1,3 @@
-# storage/paths.py
 from __future__ import annotations
 
 import os
@@ -8,56 +7,26 @@ import sys
 from pathlib import Path
 
 
-APP_NAME = "FundEstimator"
 _USER_ID_ENV = "FUND_ESTIMATOR_USER_ID"
 _DEFAULT_USER_ID = "public"
-_SEEDED_FILES = (
-    "fund_cache.json",
-    "fund_profile_map.json",
-    "fund_holdings_map.json",
-    "stock_quote_map.json",
-)
-
-
-def _is_frozen() -> bool:
-    return bool(getattr(sys, "frozen", False))
-
-
-def bundle_root() -> Path:
-    """
-    Source code/data root for imports and bundled assets.
-    - dev: repository root
-    - frozen: PyInstaller extraction directory (sys._MEIPASS) when available
-    """
-    if _is_frozen():
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            return Path(str(meipass)).resolve()
-    return Path(__file__).resolve().parent.parent
-
-
-def runtime_root() -> Path:
-    """
-    Writable app root.
-    - FUND_ESTIMATOR_HOME has highest priority
-    - Windows default: %LOCALAPPDATA%\\FundEstimator
-    - Fallback: ~/.fund_estimator
-    """
-    custom = os.getenv("FUND_ESTIMATOR_HOME", "").strip()
-    if custom:
-        return Path(custom).expanduser().resolve()
-
-    if os.name == "nt":
-        base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
-        if base:
-            return Path(base).resolve() / APP_NAME
-
-    return Path.home() / ".fund_estimator"
 
 
 def _is_streamlit_cloud() -> bool:
-    # Streamlit Community Cloud sets this variable in deployed runtime.
     return bool(os.getenv("STREAMLIT_SHARING_MODE", "").strip())
+
+
+def bundle_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def project_root() -> Path:
+    return bundle_root()
+
+
+def _data_root() -> Path:
+    if _is_streamlit_cloud():
+        return Path.home() / ".fund_estimator" / "data"
+    return project_root() / "data"
 
 
 def _sanitize_user_id(user_id: str | None) -> str:
@@ -68,8 +37,6 @@ def _sanitize_user_id(user_id: str | None) -> str:
 
 def set_active_user(user_id: str | None) -> str:
     uid = _sanitize_user_id(user_id)
-    # Keep user context in current Streamlit session only.
-    # Do not write process-global state (env/global variable), which can leak across sessions.
     try:
         if "streamlit" in sys.modules:
             from streamlit.runtime.scriptrunner import get_script_run_ctx  # type: ignore
@@ -82,13 +49,11 @@ def set_active_user(user_id: str | None) -> str:
     except Exception:
         pass
 
-    # Non-Streamlit scripts can still opt in via environment variable.
     os.environ[_USER_ID_ENV] = uid
     return uid
 
 
 def current_user_id() -> str:
-    # Streamlit runtime: strictly read from current session.
     try:
         if "streamlit" in sys.modules:
             from streamlit.runtime.scriptrunner import get_script_run_ctx  # type: ignore
@@ -103,26 +68,20 @@ def current_user_id() -> str:
     except Exception:
         pass
 
-    # Non-Streamlit runtime fallback (CLI scripts/tests).
     env_uid = os.getenv(_USER_ID_ENV, "").strip()
     if env_uid:
         return _sanitize_user_id(env_uid)
     return _DEFAULT_USER_ID
 
 
-def project_root() -> Path:
-    # Backward-compatible alias for old call sites.
-    return bundle_root()
-
-
 def data_dir() -> Path:
-    # Frozen binaries should not write into installation folders.
-    if _is_frozen():
-        return runtime_root() / "data"
-    # In Streamlit Cloud, keep writable data under user home instead of repo path.
-    if _is_streamlit_cloud():
-        return runtime_root() / "data"
-    return project_root() / "data"
+    return _data_root()
+
+
+def ensure_data_dir() -> Path:
+    d = data_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def user_data_dir(user_id: str | None = None) -> Path:
@@ -143,18 +102,11 @@ def _user_file_with_legacy_seed(filename: str) -> Path:
     return user_path
 
 
-def ensure_data_dir() -> Path:
-    d = data_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
 def _safe_filename(key: str) -> str:
     s = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(key or "").strip())
     return s or "cache"
 
 
-# ---------- common data files ----------
 def file_watchlist() -> str:
     return str(_user_file_with_legacy_seed("watchlist.json"))
 
@@ -171,7 +123,6 @@ def file_daily_ledger() -> str:
     return str(_user_file_with_legacy_seed("daily_ledger.json"))
 
 
-# ---------- intraday by date ----------
 def file_intraday(date_str: str) -> str:
     d = user_data_dir() / "intraday"
     d.mkdir(parents=True, exist_ok=True)
@@ -184,7 +135,6 @@ def file_intraday_fund(date_str: str, code: str) -> str:
     return str(d / f"{code}.json")
 
 
-# ---------- fund cache ----------
 def file_fund_cache() -> str:
     ensure_data_dir()
     return str(data_dir() / "fund_cache.json")
@@ -224,57 +174,8 @@ def file_auth_sessions() -> str:
     return str(d / "sessions.json")
 
 
-def status_dir() -> Path:
-    d = runtime_root() / "status"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def logs_dir() -> Path:
-    d = runtime_root() / "logs"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def file_collector_pid(user_id: str | None = None) -> Path:
-    uid = _sanitize_user_id(user_id) if user_id is not None else current_user_id()
-    return status_dir() / f"collector_{uid}.pid"
-
-
-def file_collector_status(user_id: str | None = None) -> Path:
-    uid = _sanitize_user_id(user_id) if user_id is not None else current_user_id()
-    return status_dir() / f"collector_status_{uid}.json"
-
-
-def file_collector_log(user_id: str | None = None) -> Path:
-    uid = _sanitize_user_id(user_id) if user_id is not None else current_user_id()
-    return logs_dir() / f"collector_{uid}.log"
-
-
-def _seed_runtime_data() -> None:
-    if not _is_frozen():
-        return
-
-    src_data = bundle_root() / "data"
-    dst_data = data_dir()
-    if not src_data.exists():
-        return
-
-    for name in _SEEDED_FILES:
-        src = src_data / name
-        dst = dst_data / name
-        if src.exists() and not dst.exists():
-            try:
-                shutil.copy2(src, dst)
-            except Exception:
-                # Seeds are optional; ignore copy failures.
-                pass
-
-
 def ensure_dirs() -> None:
     ensure_data_dir()
     (data_dir() / "intraday").mkdir(parents=True, exist_ok=True)
     (data_dir() / "http_cache").mkdir(parents=True, exist_ok=True)
     (data_dir() / "raw").mkdir(parents=True, exist_ok=True)
-    status_dir()
-    _seed_runtime_data()

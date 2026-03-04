@@ -36,11 +36,6 @@ ENABLE_MULTI_SOURCE_CROSSCHECK = True
 CROSSCHECK_WARN_DIFF_PCT = 1.2
 CROSSCHECK_SEVERE_DIFF_PCT = 2.5
 
-# Collector behavior (no UI controls; code-only config)
-COLLECTOR_AUTO_START = True
-COLLECTOR_TRADING_INTERVAL_SEC = 60
-COLLECTOR_OFFMARKET_INTERVAL_SEC = 30 * 60
-
 # Home page auto refresh (code-only config, no UI)
 HOME_AUTO_REFRESH_ENABLED = True
 HOME_AUTO_REFRESH_SEC = 60
@@ -62,6 +57,3 @@ AUTH_QUERY_LOGIN_ENABLED = False
 # Keep web login after browser refresh via short-lived session id in query params.
 AUTH_PERSIST_LOGIN_ENABLED = True
 AUTH_SESSION_DAYS = 14
-
-# Web mode: if cloud sync fails, do not keep local-only watchlist items.
-WEB_WATCHLIST_REQUIRE_CLOUD_SYNC = True
