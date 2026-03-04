@@ -19,15 +19,21 @@ import plotly.graph_objects as go
 from services.portfolio_service import portfolio_realtime_view_as_of
 from services.cloud_status_service import get_cloud_error
 from services.edit_bridge_service import apply_position_edit
+from services.portfolio_import_service import (
+    apply_import_preview,
+    build_import_preview,
+    holdings_image_import_enabled,
+)
 from services.snapshot_service import build_positions_as_of
 from services.watchlist_service import watchlist_list
 from services.accuracy_service import portfolio_gap_summary, portfolio_gap_table
 from services.fund_service import get_fund_profile
 from services.estimation_service import estimate_one
 from services.history_service import get_fund_cumulative_pnl_on
+from services.vision_holdings_service import analyze_holdings_image
 from services import adjustment_service
 from services.auth_guard import require_login
-from services.trading_time import now_cn
+from services.trading_time import cn_market_phase, now_cn
 from config import settings
 
 
@@ -50,11 +56,17 @@ def _apply_silent_autorefresh_style() -> None:
 
 # auto refresh (Portfolio)
 _portfolio_auto_on = bool(getattr(settings, "PORTFOLIO_AUTO_REFRESH_ENABLED", True))
-_portfolio_refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC", 30)
+_portfolio_phase = cn_market_phase(now_cn())
+if _portfolio_phase == "trading":
+    _portfolio_refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC", 30)
+elif _portfolio_phase == "lunch":
+    _portfolio_refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC_LUNCH", 300)
+else:
+    _portfolio_refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC_NON_TRADING", 900)
 try:
-    _portfolio_refresh_sec = int(30 if _portfolio_refresh_raw is None else _portfolio_refresh_raw)
+    _portfolio_refresh_sec = int(_portfolio_refresh_raw)
 except Exception:
-    _portfolio_refresh_sec = 30
+    _portfolio_refresh_sec = 30 if _portfolio_phase == "trading" else (300 if _portfolio_phase == "lunch" else 900)
 if _portfolio_auto_on and _portfolio_refresh_sec > 0:
     _apply_silent_autorefresh_style()
     if st_autorefresh is not None:
@@ -72,6 +84,228 @@ def _remove_adjustments_by_code_safe(code: str) -> int:
         return int(fn(code) or 0)
 
     return 0
+
+
+def _import_mode_value(label: str) -> str:
+    return "sync" if "同步" in str(label or "") else "delta"
+
+
+def _render_image_import(date_str: str) -> None:
+    st.subheader("图片导入持仓")
+    st.caption("支持两种模式：同步持仓会覆盖到图片识别出的最终仓位；加减仓会在当前持仓基础上做增减。")
+
+    if not holdings_image_import_enabled():
+        st.info("未启用图片识别。请在 `.streamlit/secrets.toml` 配置 `GEMINI_API_KEY`，可选配置 `GEMINI_MODEL` 和 `GEMINI_API_BASE_URL`。")
+        return
+
+    mode_label = st.radio(
+        "图片导入方式",
+        ["同步持仓（覆盖原持仓）", "加减仓（在原持仓上增减）"],
+        horizontal=True,
+        key="holding_image_mode_label",
+    )
+    import_mode = _import_mode_value(mode_label)
+    files = st.file_uploader(
+        "上传持仓截图",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key="holding_image_files",
+    )
+    if files:
+        st.caption(f"已选择 {len(files)} 张图片，请点击“识别图片”。")
+
+    col_recognize, col_clear = st.columns([1, 1])
+    with col_recognize:
+        if st.button("识别图片", type="primary", disabled=not files, width="stretch"):
+            rows = []
+            warnings = []
+            status = {"level": "info", "message": "开始识别图片。"}
+            with st.spinner("正在识别图片..."):
+                for file in files or []:
+                    try:
+                        result = analyze_holdings_image(
+                            image_bytes=file.getvalue(),
+                            mime_type=file.type or "image/png",
+                            filename=file.name,
+                            mode=import_mode,
+                        )
+                        for item in result.get("rows", []):
+                            if not isinstance(item, dict):
+                                continue
+                            row = dict(item)
+                            row["source_image"] = file.name
+                            rows.append(row)
+                        for warn in result.get("warnings", []):
+                            if str(warn or "").strip():
+                                warnings.append(f"{file.name}: {warn}")
+                    except Exception as e:
+                        warnings.append(f"{file.name}: 识别失败 - {e}")
+            st.session_state["holding_image_rows"] = rows
+            st.session_state["holding_image_warnings"] = warnings
+            st.session_state["holding_image_preview"] = None
+            st.session_state["holding_image_last_run"] = {
+                "file_count": len(files or []),
+                "row_count": len(rows),
+                "warning_count": len(warnings),
+                "mode": import_mode,
+            }
+            if rows:
+                status = {"level": "success", "message": f"识别完成：共提取 {len(rows)} 条记录。"}
+            elif warnings:
+                status = {"level": "error", "message": "识别未提取到有效记录，请检查下方报错。"}
+            else:
+                status = {"level": "warning", "message": "识别完成，但没有提取到任何持仓记录。请更换更清晰的截图，或手工补录。"}
+            st.session_state["holding_image_status"] = status
+
+    with col_clear:
+        if st.button("清空识别结果", width="stretch"):
+            st.session_state.pop("holding_image_rows", None)
+            st.session_state.pop("holding_image_warnings", None)
+            st.session_state.pop("holding_image_preview", None)
+            st.session_state.pop("holding_image_status", None)
+            st.session_state.pop("holding_image_last_run", None)
+            st.rerun()
+
+    status = st.session_state.get("holding_image_status")
+    if isinstance(status, dict):
+        level = str(status.get("level", "info"))
+        message = str(status.get("message", "")).strip()
+        if message:
+            if level == "success":
+                st.success(message)
+            elif level == "warning":
+                st.warning(message)
+            elif level == "error":
+                st.error(message)
+            else:
+                st.info(message)
+
+    last_run = st.session_state.get("holding_image_last_run")
+    if isinstance(last_run, dict):
+        st.caption(
+            "最近一次识别："
+            f" 模式={last_run.get('mode', '-')}"
+            f"，图片数={last_run.get('file_count', 0)}"
+            f"，记录数={last_run.get('row_count', 0)}"
+            f"，警告数={last_run.get('warning_count', 0)}"
+        )
+
+    warnings = st.session_state.get("holding_image_warnings", [])
+    for warn in warnings:
+        st.warning(str(warn))
+
+    rows = st.session_state.get("holding_image_rows", [])
+    if not rows:
+        return
+
+    raw_df = pd.DataFrame(rows)
+    default_cols = ["source_image", "code", "fund_name", "confidence", "notes"]
+    if import_mode == "sync":
+        editable_cols = ["shares", "avg_cost_nav", "amount", "cumulative_pnl", "daily_pnl", "pnl_pct"]
+    else:
+        editable_cols = ["delta_shares", "delta_amount", "avg_price", "side"]
+    for col in default_cols + editable_cols:
+        if col not in raw_df.columns:
+            raw_df[col] = None
+    raw_df = raw_df[default_cols + editable_cols]
+
+    st.caption("识别结果支持手工修正，导入前建议核对基金代码和数值。")
+    edited_df = st.data_editor(
+        raw_df,
+        width="stretch",
+        hide_index=True,
+        num_rows="dynamic",
+        key="holding_image_editor",
+        column_config={
+            "confidence": st.column_config.NumberColumn("置信度", format="%.2f"),
+        },
+    )
+
+    if st.button("生成导入预览", width="stretch"):
+        preview = build_import_preview(
+            rows=edited_df.where(pd.notnull(edited_df), None).to_dict("records"),
+            mode=import_mode,
+            effective_date=date_str,
+        )
+        st.session_state["holding_image_preview"] = preview
+
+    preview = st.session_state.get("holding_image_preview")
+    if not isinstance(preview, dict):
+        return
+    if preview.get("mode") != import_mode or preview.get("effective_date") != date_str:
+        st.info("导入模式或日期已变化，请重新点击“生成导入预览”。")
+        return
+
+    preview_rows = []
+    for item in preview.get("rows", []):
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        row["warnings"] = "；".join(row.get("warnings", []) or [])
+        row["errors"] = "；".join(row.get("errors", []) or [])
+        preview_rows.append(row)
+
+    if preview_rows:
+        preview_df = pd.DataFrame(preview_rows)
+        show_cols = [
+            "code",
+            "fund_name",
+            "operation",
+            "current_shares",
+            "delta_shares",
+            "target_shares",
+            "target_avg_cost_nav",
+            "target_realized_pnl",
+            "recognized_amount",
+            "recognized_cumulative_pnl",
+            "recognized_pnl_pct",
+            "warnings",
+            "errors",
+        ]
+        show_cols = [c for c in show_cols if c in preview_df.columns]
+        st.dataframe(
+            preview_df[show_cols],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "current_shares": st.column_config.NumberColumn(format="%.4f"),
+                "delta_shares": st.column_config.NumberColumn(format="%.4f"),
+                "target_shares": st.column_config.NumberColumn(format="%.4f"),
+                "target_avg_cost_nav": st.column_config.NumberColumn(format="%.6f"),
+                "target_realized_pnl": st.column_config.NumberColumn(format="%.4f"),
+                "recognized_amount": st.column_config.NumberColumn(format="%.2f"),
+                "recognized_cumulative_pnl": st.column_config.NumberColumn(format="%.2f"),
+                "recognized_pnl_pct": st.column_config.NumberColumn(format="%.2f"),
+            },
+        )
+
+    if int(preview.get("error_count", 0) or 0) > 0:
+        st.error(f"预览中有 {preview['error_count']} 条错误，请先修正后再导入。")
+
+    clear_count = int(preview.get("clear_count", 0) or 0)
+    clear_confirmed = True
+    if import_mode == "sync" and clear_count > 0:
+        st.warning(f"同步持仓模式会额外清零 {clear_count} 个未出现在图片中的现有持仓。")
+        clear_confirmed = st.checkbox(
+            "我确认同步持仓需要覆盖未识别到的现有持仓",
+            value=False,
+            key="holding_image_sync_confirm",
+        )
+
+    apply_disabled = (
+        int(preview.get("valid_count", 0) or 0) <= 0
+        or int(preview.get("error_count", 0) or 0) > 0
+        or (import_mode == "sync" and clear_count > 0 and not clear_confirmed)
+    )
+    if st.button("确认导入图片持仓", type="primary", disabled=apply_disabled, width="stretch"):
+        try:
+            with st.spinner("正在写入持仓流水..."):
+                result = apply_import_preview(preview)
+            st.success(f"导入完成：已写入 {result['applied']} 条，跳过 {result['skipped']} 条。")
+            st.session_state.pop("holding_image_preview", None)
+            st.rerun()
+        except Exception as e:
+            st.error(f"导入失败：{e}")
 
 
 def render_portfolio():
@@ -370,6 +604,9 @@ def render_portfolio():
         )
     else:
         st.dataframe(df_pos, width="stretch", hide_index=True, height=detail_height)
+
+    st.divider()
+    _render_image_import(date_str)
 
     st.divider()
     st.subheader("编辑持仓（生成流水）")

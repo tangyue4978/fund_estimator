@@ -21,3 +21,16 @@ def is_cn_trading_time(now: datetime) -> bool:
     t = now.timetz().replace(tzinfo=None) if now.tzinfo is not None else now.time()
     return (dtime(9, 30) <= t <= dtime(11, 30)) or (dtime(13, 0) <= t <= dtime(15, 0))
 
+
+def cn_market_phase(now: datetime | None = None) -> str:
+    cur = now or now_cn()
+    if cur.weekday() >= 5:
+        return "closed"
+    t = cur.timetz().replace(tzinfo=None) if cur.tzinfo is not None else cur.time()
+    if dtime(9, 30) <= t <= dtime(11, 30):
+        return "trading"
+    if dtime(11, 30) < t < dtime(13, 0):
+        return "lunch"
+    if dtime(13, 0) <= t <= dtime(15, 0):
+        return "trading"
+    return "closed"

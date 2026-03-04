@@ -25,6 +25,7 @@ from services.settlement_service import get_ledger_row
 from services.auth_guard import require_login
 from services.accuracy_service import fund_gap_summary, guess_gap_reasons, fund_gap_table
 from services.fund_service import get_fund_profile
+from services.trading_time import cn_market_phase
 from config import settings
 
 
@@ -47,11 +48,17 @@ def _apply_silent_autorefresh_style() -> None:
 
 # auto refresh
 _auto_on = bool(getattr(settings, "FUND_DETAIL_AUTO_REFRESH_ENABLED", True))
-_refresh_raw = getattr(settings, "FUND_DETAIL_AUTO_REFRESH_SEC", 30)
+_fund_detail_phase = cn_market_phase(now_cn())
+if _fund_detail_phase == "trading":
+    _refresh_raw = getattr(settings, "FUND_DETAIL_AUTO_REFRESH_SEC", 30)
+elif _fund_detail_phase == "lunch":
+    _refresh_raw = getattr(settings, "FUND_DETAIL_AUTO_REFRESH_SEC_LUNCH", 300)
+else:
+    _refresh_raw = getattr(settings, "FUND_DETAIL_AUTO_REFRESH_SEC_NON_TRADING", 900)
 try:
-    _refresh_sec = int(30 if _refresh_raw is None else _refresh_raw)
+    _refresh_sec = int(_refresh_raw)
 except Exception:
-    _refresh_sec = 30
+    _refresh_sec = 30 if _fund_detail_phase == "trading" else (300 if _fund_detail_phase == "lunch" else 900)
 if _auto_on and _refresh_sec > 0:
     _apply_silent_autorefresh_style()
     if st_autorefresh is not None:

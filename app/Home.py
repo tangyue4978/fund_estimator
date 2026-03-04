@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover
 
 from services.estimation_service import estimate_many
 from services.cloud_status_service import get_cloud_error
-from services.trading_time import now_cn
+from services.trading_time import cn_market_phase, now_cn
 from services.watchlist_service import watchlist_add, watchlist_list, watchlist_remove
 
 try:
@@ -47,11 +47,15 @@ def _apply_silent_autorefresh_style() -> None:
 
 
 def _home_refresh_sec() -> int:
-    raw = getattr(settings, "HOME_AUTO_REFRESH_SEC", 60)
+    phase = cn_market_phase(now_cn())
+    if phase == "trading":
+        raw = getattr(settings, "HOME_AUTO_REFRESH_SEC", 60)
+    else:
+        raw = getattr(settings, "HOME_AUTO_REFRESH_SEC_NON_TRADING", 1800)
     try:
         return max(0, int(raw))
     except Exception:
-        return 60
+        return 60 if phase == "trading" else 1800
 
 
 if bool(getattr(settings, "HOME_AUTO_REFRESH_ENABLED", True)):

@@ -39,14 +39,19 @@ CROSSCHECK_SEVERE_DIFF_PCT = 2.5
 # Home page auto refresh (code-only config, no UI)
 HOME_AUTO_REFRESH_ENABLED = True
 HOME_AUTO_REFRESH_SEC = 60
+HOME_AUTO_REFRESH_SEC_NON_TRADING = 1800
 
 # Portfolio page auto refresh (code-only config, no UI)
 PORTFOLIO_AUTO_REFRESH_ENABLED = True
 PORTFOLIO_AUTO_REFRESH_SEC = 30
+PORTFOLIO_AUTO_REFRESH_SEC_LUNCH = 300
+PORTFOLIO_AUTO_REFRESH_SEC_NON_TRADING = 900
 
 # Fund detail page auto refresh (code-only config, no UI)
 FUND_DETAIL_AUTO_REFRESH_ENABLED = True
 FUND_DETAIL_AUTO_REFRESH_SEC = 30
+FUND_DETAIL_AUTO_REFRESH_SEC_LUNCH = 300
+FUND_DETAIL_AUTO_REFRESH_SEC_NON_TRADING = 900
 
 # Hide Streamlit running status widget during auto-refresh (code-only config, no UI)
 SILENT_AUTO_REFRESH_UI = True
