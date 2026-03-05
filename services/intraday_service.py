@@ -96,40 +96,8 @@ def record_intraday_point(
     if not target:
         raise ValueError("target is required")
 
-    d = (date_str or _today_str()).strip()
-    p = paths.file_intraday(d)
-
-    def updater(data: dict):
-        data = _ensure_intraday_file(d, data)
-        series = data.get("series", {})
-        points = series.get(target, [])
-        if not isinstance(points, list):
-            points = []
-
-        point: Dict[str, Any] = {"t": _now_hhmmss()}
-        if marker:
-            point["marker"] = marker
-
-        if estimate is not None:
-            point.update(_build_point_from_estimate(estimate))
-
-        if portfolio_view is not None:
-            point.update(
-                {
-                    "total_est_value": float(portfolio_view.get("total_est_value", 0.0) or 0.0),
-                    "total_est_pnl": float(portfolio_view.get("total_est_pnl", 0.0) or 0.0),
-                    "total_est_pnl_pct": float(portfolio_view.get("total_est_pnl_pct", 0.0) or 0.0),
-                    "realtime_coverage_value_pct": float(portfolio_view.get("realtime_coverage_value_pct", 0.0) or 0.0),
-                }
-            )
-
-        points.append(point)
-        series[target] = points
-        data["series"] = series
-        data["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        return data
-
-    return update_json(p, updater)
+    # intraday estimation history persistence is disabled.
+    return {}
 
 
 def get_intraday_series(target: str, *, date_str: Optional[str] = None) -> List[dict]:

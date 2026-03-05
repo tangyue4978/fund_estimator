@@ -13,11 +13,6 @@ paths.ensure_dirs()
 
 import streamlit as st
 
-try:
-    from streamlit_autorefresh import st_autorefresh
-except Exception:  # pragma: no cover
-    st_autorefresh = None
-
 from services.estimation_service import estimate_many
 from services.cloud_status_service import get_cloud_error
 from services.trading_time import cn_market_phase, now_cn
@@ -33,19 +28,6 @@ st.set_page_config(page_title="Fund Estimator", layout="wide")
 require_login()
 
 
-def _apply_silent_autorefresh_style() -> None:
-    if not bool(getattr(settings, "SILENT_AUTO_REFRESH_UI", True)):
-        return
-    st.markdown(
-        """
-<style>
-[data-testid="stStatusWidget"] { display: none !important; }
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def _home_refresh_sec() -> int:
     phase = cn_market_phase(now_cn())
     if phase == "trading":
@@ -58,50 +40,12 @@ def _home_refresh_sec() -> int:
         return 60 if phase == "trading" else 1800
 
 
-if bool(getattr(settings, "HOME_AUTO_REFRESH_ENABLED", True)):
-    refresh_sec = _home_refresh_sec()
-    if refresh_sec > 0:
-        _apply_silent_autorefresh_style()
-        if st_autorefresh is not None:
-            st_autorefresh(interval=refresh_sec * 1000, key="home_autorefresh")
-        elif hasattr(st, "autorefresh"):
-            st.autorefresh(interval=refresh_sec * 1000, key="home_autorefresh")
+def _home_fragment_refresh_enabled() -> bool:
+    auto_on = bool(getattr(settings, "HOME_AUTO_REFRESH_ENABLED", True))
+    return auto_on and _home_refresh_sec() > 0 and hasattr(st, "fragment")
 
 
-def render_watchlist() -> None:
-    st.title("自选基金 - 实时预估")
-    st.sidebar.caption("网页版按页面自动刷新展示估值。")
-    watchlist_err = get_cloud_error("watchlist")
-    if watchlist_err:
-        st.warning(f"自选列表读取失败，当前页面可能显示为空数据：{watchlist_err}")
-
-    col1, col2, col3 = st.columns([2, 1, 1])
-
-    with col1:
-        code = st.text_input("新增基金代码", value="", placeholder="例如：510300 / 000001")
-
-    with col2:
-        if st.button("添加", width="stretch") and code.strip():
-            if callable(watchlist_add_result):
-                res = watchlist_add_result(code.strip())
-                if bool(res.get("ok")):
-                    st.toast(str(res.get("message", "已添加")), icon="✅")
-                else:
-                    st.toast(str(res.get("message", "添加失败")), icon="❌")
-            else:
-                watchlist_add(code.strip())
-                st.toast("已添加", icon="✅")
-            st.rerun()
-
-    with col3:
-        if st.button("刷新估值", width="stretch"):
-            st.rerun()
-
-    codes = watchlist_list()
-    if not codes:
-        st.info("自选为空：输入代码点击添加。")
-        return
-
+def _build_watchlist_rows(codes: list[str]) -> tuple[list[dict], dict]:
     est_map = estimate_many(codes)
     rows = []
     for code_item in codes:
@@ -132,9 +76,65 @@ def render_watchlist() -> None:
                 "warn": est.warning or "",
             }
         )
+    return rows, est_map
 
+
+def _render_watchlist_live(codes: list[str]) -> dict:
+    rows, est_map = _build_watchlist_rows(codes)
     st.caption(f"更新时间：{now_cn().isoformat(timespec='seconds')}（仅展示线上估值）")
-    st.dataframe(rows, width="stretch", hide_index=True)
+    row_height = 35
+    header_height = 38
+    table_height = header_height + max(1, len(rows)) * row_height
+    st.dataframe(rows, width="stretch", hide_index=True, height=table_height)
+    return est_map
+
+
+def render_watchlist() -> None:
+    st.title("自选基金 - 实时估值")
+    st.sidebar.caption("列表估值数据会按交易时段自动局部刷新。")
+    watchlist_err = get_cloud_error("watchlist")
+    if watchlist_err:
+        st.warning(f"自选列表读取失败，当前页面可能显示为空数据：{watchlist_err}")
+
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        code = st.text_input("新增基金代码", value="", placeholder="例如：510300 / 000001")
+    with col2:
+        if st.button("添加", width="stretch") and code.strip():
+            if callable(watchlist_add_result):
+                res = watchlist_add_result(code.strip())
+                if bool(res.get("ok")):
+                    st.toast(str(res.get("message", "已添加")), icon="✅")
+                else:
+                    st.toast(str(res.get("message", "添加失败")), icon="❌")
+            else:
+                watchlist_add(code.strip())
+                st.toast("已添加", icon="✅")
+            st.rerun()
+    with col3:
+        if st.button("刷新估值", width="stretch"):
+            st.rerun()
+
+    codes = watchlist_list()
+    if not codes:
+        st.info("自选为空：输入代码点击添加。")
+        return
+
+    refresh_sec = _home_refresh_sec()
+    use_fragment_refresh = _home_fragment_refresh_enabled()
+    est_map = {}
+    live_watchlist_area = st.container()
+    if use_fragment_refresh:
+        @st.fragment(run_every=f"{refresh_sec}s")
+        def _live_watchlist_fragment() -> None:
+            with live_watchlist_area:
+                _render_watchlist_live(codes)
+
+        _live_watchlist_fragment()
+        _, est_map = _build_watchlist_rows(codes)
+    else:
+        with live_watchlist_area:
+            est_map = _render_watchlist_live(codes)
 
     name_map = {c: ((est_map.get(c).name if est_map.get(c) else "") or f"基金{c}") for c in codes}
 

@@ -8,10 +8,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import streamlit as st
 from datetime import date, timedelta
-try:
-    from streamlit_autorefresh import st_autorefresh
-except Exception:  # pragma: no cover
-    st_autorefresh = None
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -41,38 +37,23 @@ st.set_page_config(page_title="Portfolio", layout="wide")
 require_login()
 
 
-def _apply_silent_autorefresh_style() -> None:
-    if not bool(getattr(settings, "SILENT_AUTO_REFRESH_UI", True)):
-        return
-    st.markdown(
-        """
-<style>
-[data-testid="stStatusWidget"] { display: none !important; }
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
+def _portfolio_refresh_sec() -> int:
+    phase = cn_market_phase(now_cn())
+    if phase == "trading":
+        refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC", 30)
+    elif phase == "lunch":
+        refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC_LUNCH", 300)
+    else:
+        refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC_NON_TRADING", 900)
+    try:
+        return max(0, int(refresh_raw))
+    except Exception:
+        return 30 if phase == "trading" else (300 if phase == "lunch" else 900)
 
 
-# auto refresh (Portfolio)
-_portfolio_auto_on = bool(getattr(settings, "PORTFOLIO_AUTO_REFRESH_ENABLED", True))
-_portfolio_phase = cn_market_phase(now_cn())
-if _portfolio_phase == "trading":
-    _portfolio_refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC", 30)
-elif _portfolio_phase == "lunch":
-    _portfolio_refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC_LUNCH", 300)
-else:
-    _portfolio_refresh_raw = getattr(settings, "PORTFOLIO_AUTO_REFRESH_SEC_NON_TRADING", 900)
-try:
-    _portfolio_refresh_sec = int(_portfolio_refresh_raw)
-except Exception:
-    _portfolio_refresh_sec = 30 if _portfolio_phase == "trading" else (300 if _portfolio_phase == "lunch" else 900)
-if _portfolio_auto_on and _portfolio_refresh_sec > 0:
-    _apply_silent_autorefresh_style()
-    if st_autorefresh is not None:
-        st_autorefresh(interval=int(_portfolio_refresh_sec) * 1000, key="portfolio_autorefresh")
-    elif hasattr(st, "autorefresh"):
-        st.autorefresh(interval=int(_portfolio_refresh_sec) * 1000, key="portfolio_autorefresh")
+def _portfolio_fragment_refresh_enabled() -> bool:
+    auto_on = bool(getattr(settings, "PORTFOLIO_AUTO_REFRESH_ENABLED", True))
+    return auto_on and _portfolio_refresh_sec() > 0 and hasattr(st, "fragment")
 
 
 def _remove_adjustments_by_code_safe(code: str) -> int:
@@ -308,6 +289,191 @@ def _render_image_import(date_str: str) -> None:
             st.error(f"导入失败：{e}")
 
 
+def _load_portfolio_view(date_str: str) -> tuple[dict, float]:
+    view = portfolio_realtime_view_as_of(date_str)
+    pos_df = pd.DataFrame(view.get("positions", []))
+    if pos_df.empty:
+        return view, 0.0
+    pct = pd.to_numeric(pos_df.get("est_change_pct", 0.0), errors="coerce").fillna(0.0)
+    val = pd.to_numeric(pos_df.get("est_value", 0.0), errors="coerce").fillna(0.0)
+    denom = 100.0 + pct
+    today_est = 0.0
+    ok = denom.abs() > 1e-9
+    if ok.any():
+        today_est = float((val[ok] * pct[ok] / denom[ok]).sum())
+    return view, today_est
+
+
+def _render_live_summary(date_str: str) -> None:
+    view, today_est = _load_portfolio_view(date_str)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("总成本", f"{view['total_cost']:.2f}")
+    c2.metric("预估市值", f"{view['total_est_value']:.2f}")
+    c3.metric("预估盈亏", f"{view['total_est_pnl']:.2f}")
+    c4.metric("预估盈亏率", f"{view['total_est_pnl_pct']:.2f}%")
+    c5.metric("今日预计收益", f"{today_est:.2f}")
+    st.caption(f"估值覆盖率：{view['realtime_coverage_value_pct']:.2f}%")
+
+
+def _render_live_detail(date_str: str) -> None:
+    view, _ = _load_portfolio_view(date_str)
+    st.subheader("明细")
+    df_pos = pd.DataFrame(view["positions"])
+    if not df_pos.empty:
+        df_pos["fund_name"] = df_pos["code"].apply(
+            lambda c: (get_fund_profile(str(c)).name or "").strip() if str(c).strip() else ""
+        )
+        df_pos["input_amount"] = df_pos.apply(
+            lambda r: float(r.get("shares", 0.0) or 0.0) * float(r.get("avg_cost_nav", 0.0) or 0.0),
+            axis=1,
+        )
+        if "realized_pnl" in df_pos.columns:
+            df_pos = df_pos.drop(columns=["realized_pnl"])
+        if "method" in df_pos.columns:
+            df_pos = df_pos.drop(columns=["method"])
+        df_pos["cumulative_pnl"] = df_pos["est_pnl"]
+        df_pos["holding_total_current"] = df_pos["est_value"]
+        pct = pd.to_numeric(df_pos.get("est_change_pct", 0.0), errors="coerce").fillna(0.0)
+        val = pd.to_numeric(df_pos.get("est_value", 0.0), errors="coerce").fillna(0.0)
+        denom = 100.0 + pct
+        df_pos["today_est_pnl"] = 0.0
+        ok = denom.abs() > 1e-9
+        df_pos.loc[ok, "today_est_pnl"] = val[ok] * pct[ok] / denom[ok]
+        df_pos = df_pos.rename(
+            columns={
+                "code": "基金代码",
+                "fund_name": "基金名称",
+                "shares": "份额",
+                "avg_cost_nav": "成本净值",
+                "cumulative_pnl": "累计收益",
+                "today_est_pnl": "今日预计收益",
+                "holding_total_current": "持仓金额",
+                "est_nav": "预估净值",
+                "est_change_pct": "预估涨跌幅(%)",
+                "confidence": "置信度",
+                "warning": "提示",
+                "est_time": "估值时间",
+                "est_value": "预估市值",
+                "est_pnl": "预估收益",
+                "est_pnl_pct": "预估收益率(%)",
+            }
+        )
+        primary_cols = [
+            "基金代码",
+            "基金名称",
+            "持仓金额",
+            "预估涨跌幅(%)",
+            "今日预计收益",
+            "累计收益",
+            "估值时间",
+        ]
+        other_cols = [
+            "份额",
+            "成本净值",
+            "预估净值",
+            "预估收益率(%)",
+            "置信度",
+            "提示",
+        ]
+        display_cols = primary_cols + other_cols
+        display_cols = [c for c in display_cols if c in df_pos.columns]
+        df_pos = df_pos[display_cols]
+        if "基金代码" in df_pos.columns:
+            df_pos["基金代码"] = df_pos["基金代码"].astype(str)
+        if "估值时间" in df_pos.columns:
+            def _fmt_time(v):
+                s = str(v or "").strip()
+                if not s:
+                    return ""
+                if "T" in s:
+                    s = s.replace("T", " ")
+                return s[:16]
+            df_pos["估值时间"] = df_pos["估值时间"].apply(_fmt_time)
+        if "持仓金额" in df_pos.columns:
+            df_pos = df_pos.sort_values(by="持仓金额", ascending=False, kind="stable")
+
+        total_row = {c: pd.NA for c in df_pos.columns}
+        if "基金代码" in total_row:
+            total_row["基金代码"] = "总计"
+        sum_cols = ["持仓金额", "今日预计收益", "累计收益"]
+        for c in sum_cols:
+            if c in df_pos.columns:
+                total_row[c] = round(
+                    float(pd.to_numeric(df_pos[c], errors="coerce").fillna(0.0).sum()),
+                    2,
+                )
+        if "预估涨跌幅(%)" in df_pos.columns and "今日预计收益" in total_row and "持仓金额" in total_row:
+            total_today = float(total_row.get("今日预计收益", 0.0) or 0.0)
+            total_value = float(total_row.get("持仓金额", 0.0) or 0.0)
+            base = total_value - total_today
+            total_row["预估涨跌幅(%)"] = (total_today / base * 100.0) if abs(base) > 1e-9 else 0.0
+        df_pos = pd.concat([df_pos, pd.DataFrame([total_row])], ignore_index=True)
+
+        numeric_cols = [
+            c for c in df_pos.columns
+            if c not in ("基金代码", "基金名称", "估值时间", "提示")
+        ]
+        for c in numeric_cols:
+            df_pos[c] = pd.to_numeric(df_pos[c], errors="coerce")
+        for c in [
+            "持仓金额",
+            "预估涨跌幅(%)",
+            "今日预计收益",
+            "累计收益",
+            "份额",
+            "预估收益率(%)",
+            "置信度",
+        ]:
+            if c in df_pos.columns:
+                df_pos[c] = df_pos[c].round(2)
+    detail_height = 38 + max(len(df_pos), 1) * 35
+    if not df_pos.empty:
+        def _color_row(row):
+            try:
+                x = float(row.get("今日预计收益", 0.0))
+            except Exception:
+                x = 0.0
+            if x > 0:
+                color = "red"
+            elif x < 0:
+                color = "green"
+            else:
+                color = "black"
+            return [f"color: {color}"] * len(row)
+
+        styler = df_pos.style
+        if "今日预计收益" in df_pos.columns:
+            styler = styler.apply(_color_row, axis=1)
+
+        two_dec_cols = [
+            "持仓金额",
+            "预估涨跌幅(%)",
+            "今日预计收益",
+            "累计收益",
+            "份额",
+            "预估收益率(%)",
+            "置信度",
+        ]
+        four_dec_cols = ["成本净值", "预估净值"]
+        column_config = {
+            c: st.column_config.NumberColumn(format="%.2f")
+            for c in two_dec_cols
+            if c in df_pos.columns
+        }
+        for c in four_dec_cols:
+            if c in df_pos.columns:
+                column_config[c] = st.column_config.NumberColumn(format="%.4f")
+        st.dataframe(
+            styler,
+            width="stretch",
+            hide_index=True,
+            height=detail_height,
+            column_config=column_config or None,
+        )
+    else:
+        st.dataframe(df_pos, width="stretch", hide_index=True, height=detail_height)
+
+
 def render_portfolio():
     st.title("持仓 - 实时估值（按流水回放快照）")
     portfolio_ledger_err = get_cloud_error("portfolio_ledger")
@@ -320,30 +486,26 @@ def render_portfolio():
     if watchlist_err:
         st.warning(f"自选列表读取失败，编辑区候选基金可能不完整：{watchlist_err}")
 
-    d = st.date_input("as_of 日期", value=now_cn().date())
+    d = st.date_input("as_of 日期（用于编辑/回放）", value=now_cn().date())
     date_str = d.isoformat()
+    live_date_str = now_cn().date().isoformat()
+    st.caption(f"实时估值仅展示当日数据：{live_date_str}")
+    if date_str != live_date_str:
+        st.info("当前选择的是历史日期；上方实时估值与明细仍按当日口径展示。")
 
-    # 组合视图（快照口径）
-    view = portfolio_realtime_view_as_of(date_str)
-    pos_df = pd.DataFrame(view.get("positions", []))
-    if not pos_df.empty:
-        pct = pd.to_numeric(pos_df.get("est_change_pct", 0.0), errors="coerce").fillna(0.0)
-        val = pd.to_numeric(pos_df.get("est_value", 0.0), errors="coerce").fillna(0.0)
-        denom = 100.0 + pct
-        today_est = 0.0
-        ok = denom.abs() > 1e-9
-        if ok.any():
-            today_est = float((val[ok] * pct[ok] / denom[ok]).sum())
+    refresh_sec = _portfolio_refresh_sec()
+    use_fragment_refresh = _portfolio_fragment_refresh_enabled()
+    live_summary_area = st.container()
+    if use_fragment_refresh:
+        @st.fragment(run_every=f"{refresh_sec}s")
+        def _live_summary_fragment() -> None:
+            with live_summary_area:
+                _render_live_summary(live_date_str)
+
+        _live_summary_fragment()
     else:
-        today_est = 0.0
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("总成本", f"{view['total_cost']:.2f}")
-    c2.metric("预估市值", f"{view['total_est_value']:.2f}")
-    c3.metric("预估盈亏", f"{view['total_est_pnl']:.2f}")
-    c4.metric("预估盈亏率", f"{view['total_est_pnl_pct']:.2f}%")
-    c5.metric("今日预计收益", f"{today_est:.2f}")
-    st.caption(f"估值覆盖率：{view['realtime_coverage_value_pct']:.2f}%")
+        with live_summary_area:
+            _render_live_summary(live_date_str)
 
     st.subheader("组合口径：估算收盘 vs 官方净值")
 
@@ -438,172 +600,17 @@ def render_portfolio():
         st.caption("说明：组合误差是按 shares_end×净值 聚合得到的近似总价值差异。")
 
 
+    live_detail_area = st.container()
+    if use_fragment_refresh:
+        @st.fragment(run_every=f"{refresh_sec}s")
+        def _live_detail_fragment() -> None:
+            with live_detail_area:
+                _render_live_detail(live_date_str)
 
-    st.subheader("明细")
-    df_pos = pd.DataFrame(view["positions"])
-    if not df_pos.empty:
-        df_pos["fund_name"] = df_pos["code"].apply(
-            lambda c: (get_fund_profile(str(c)).name or "").strip() if str(c).strip() else ""
-        )
-        df_pos["input_amount"] = df_pos.apply(
-            lambda r: float(r.get("shares", 0.0) or 0.0) * float(r.get("avg_cost_nav", 0.0) or 0.0),
-            axis=1,
-        )
-        if "realized_pnl" in df_pos.columns:
-            df_pos = df_pos.drop(columns=["realized_pnl"])
-        if "method" in df_pos.columns:
-            df_pos = df_pos.drop(columns=["method"])
-        # est_pnl is the total cumulative PnL under current estimate.
-        df_pos["cumulative_pnl"] = df_pos["est_pnl"]
-        # Current holding total value (no back-out of today's estimated pnl).
-        df_pos["holding_total_current"] = df_pos["est_value"]
-        # Approximate today's estimated PnL from current value and intraday pct.
-        pct = pd.to_numeric(df_pos.get("est_change_pct", 0.0), errors="coerce").fillna(0.0)
-        val = pd.to_numeric(df_pos.get("est_value", 0.0), errors="coerce").fillna(0.0)
-        denom = 100.0 + pct
-        df_pos["today_est_pnl"] = 0.0
-        ok = denom.abs() > 1e-9
-        df_pos.loc[ok, "today_est_pnl"] = val[ok] * pct[ok] / denom[ok]
-        df_pos = df_pos.rename(
-            columns={
-                "code": "基金代码",
-                "fund_name": "基金名称",
-                "shares": "份额",
-                "avg_cost_nav": "成本净值",
-                "cumulative_pnl": "累计收益",
-                "today_est_pnl": "今日预计收益",
-                "holding_total_current": "持仓金额",
-                "est_nav": "预估净值",
-                "est_change_pct": "预估涨跌幅(%)",
-                "confidence": "置信度",
-                "warning": "提示",
-                "est_time": "估值时间",
-                "est_value": "预估市值",
-                "est_pnl": "预估收益",
-                "est_pnl_pct": "预估收益率(%)",
-            }
-        )
-        # 明细展示顺序：核心字段优先，其余放后面
-        primary_cols = [
-            "基金代码",
-            "基金名称",
-            "持仓金额",
-            "预估涨跌幅(%)",
-            "今日预计收益",
-            "累计收益",
-            "估值时间",
-        ]
-        other_cols = [
-            "份额",
-            "成本净值",
-            "预估净值",
-            "预估收益率(%)",
-            "置信度",
-            "提示",
-        ]
-        display_cols = primary_cols + other_cols
-        display_cols = [c for c in display_cols if c in df_pos.columns]
-        df_pos = df_pos[display_cols]
-        if "基金代码" in df_pos.columns:
-            df_pos["基金代码"] = df_pos["基金代码"].astype(str)
-        # Format est time to minutes.
-        if "估值时间" in df_pos.columns:
-            def _fmt_time(v):
-                s = str(v or "").strip()
-                if not s:
-                    return ""
-                if "T" in s:
-                    s = s.replace("T", " ")
-                return s[:16]
-            df_pos["估值时间"] = df_pos["估值时间"].apply(_fmt_time)
-        # 默认按持仓总当前从大到小，优先看大仓位。
-        if "持仓金额" in df_pos.columns:
-            df_pos = df_pos.sort_values(by="持仓金额", ascending=False, kind="stable")
-
-        # 末行追加“总计”
-        total_row = {c: pd.NA for c in df_pos.columns}
-        if "基金代码" in total_row:
-            total_row["基金代码"] = "总计"
-        sum_cols = ["持仓金额", "今日预计收益", "累计收益"]
-        for c in sum_cols:
-            if c in df_pos.columns:
-                total_row[c] = round(
-                    float(pd.to_numeric(df_pos[c], errors="coerce").fillna(0.0).sum()),
-                    2,
-                )
-        # 组合预估涨跌幅(%)：基于“今日预计收益 + 总金额(持仓金额)”反推。
-        if "预估涨跌幅(%)" in df_pos.columns and "今日预计收益" in total_row and "持仓金额" in total_row:
-            total_today = float(total_row.get("今日预计收益", 0.0) or 0.0)
-            total_value = float(total_row.get("持仓金额", 0.0) or 0.0)
-            base = total_value - total_today
-            total_row["预估涨跌幅(%)"] = (total_today / base * 100.0) if abs(base) > 1e-9 else 0.0
-        df_pos = pd.concat([df_pos, pd.DataFrame([total_row])], ignore_index=True)
-
-        # Keep numeric values as numeric types for alignment.
-        numeric_cols = [
-            c for c in df_pos.columns
-            if c not in ("基金代码", "基金名称", "估值时间", "提示")
-        ]
-        for c in numeric_cols:
-            df_pos[c] = pd.to_numeric(df_pos[c], errors="coerce")
-        # Round key numeric columns for display.
-        for c in [
-            "持仓金额",
-            "预估涨跌幅(%)",
-            "今日预计收益",
-            "累计收益",
-            "份额",
-            "预估收益率(%)",
-            "置信度",
-        ]:
-            if c in df_pos.columns:
-                df_pos[c] = df_pos[c].round(2)
-    detail_height = 38 + max(len(df_pos), 1) * 35
-    if not df_pos.empty:
-        def _color_row(row):
-            try:
-                x = float(row.get("今日预计收益", 0.0))
-            except Exception:
-                x = 0.0
-            if x > 0:
-                color = "red"
-            elif x < 0:
-                color = "green"
-            else:
-                color = "black"
-            return [f"color: {color}"] * len(row)
-
-        styler = df_pos.style
-        if "今日预计收益" in df_pos.columns:
-            styler = styler.apply(_color_row, axis=1)
-
-        two_dec_cols = [
-            "持仓金额",
-            "预估涨跌幅(%)",
-            "今日预计收益",
-            "累计收益",
-            "份额",
-            "预估收益率(%)",
-            "置信度",
-        ]
-        four_dec_cols = ["成本净值", "预估净值"]
-        column_config = {
-            c: st.column_config.NumberColumn(format="%.2f")
-            for c in two_dec_cols
-            if c in df_pos.columns
-        }
-        for c in four_dec_cols:
-            if c in df_pos.columns:
-                column_config[c] = st.column_config.NumberColumn(format="%.4f")
-        st.dataframe(
-            styler,
-            width="stretch",
-            hide_index=True,
-            height=detail_height,
-            column_config=column_config or None,
-        )
+        _live_detail_fragment()
     else:
-        st.dataframe(df_pos, width="stretch", hide_index=True, height=detail_height)
+        with live_detail_area:
+            _render_live_detail(live_date_str)
 
     st.divider()
     _render_image_import(date_str)
