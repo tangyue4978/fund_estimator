@@ -490,7 +490,6 @@ def _render_live_detail(date_str: str) -> None:
     else:
         st.dataframe(df_pos, width="stretch", hide_index=True, height=detail_height)
 
-
 def render_portfolio():
     st.title("持仓 - 实时估值（按流水回放快照）")
     portfolio_ledger_err = get_cloud_error("portfolio_ledger")

@@ -121,7 +121,7 @@ def watchlist_add_result(code: str) -> Dict[str, Any]:
             "ok": False,
             "code": code_n,
             "items": watchlist_list(),
-            "message": "代码格式无效（仅支持3-20位字母/数字/._-）",
+            "message": "代码格式无效（仅支持 3-20 位字母、数字、点、下划线或短横线）",
             "cloud_synced": False,
         }
 
@@ -170,7 +170,12 @@ def watchlist_remove(code: str) -> dict:
     if not code_n:
         return {"ok": True, "items": watchlist_list(), "updated_at": _now_iso()}
     if not supabase_client.is_enabled():
-        return {"ok": False, "items": watchlist_list(), "updated_at": _now_iso(), "message": "云端未配置，无法移除自选"}
+        return {
+            "ok": False,
+            "items": watchlist_list(),
+            "updated_at": _now_iso(),
+            "message": "云端未配置，无法移除自选",
+        }
 
     try:
         uid = _current_user_id()
@@ -187,7 +192,12 @@ def watchlist_remove(code: str) -> dict:
         return {"ok": True, "items": watchlist_list(), "updated_at": _now_iso()}
     except Exception as e:
         set_cloud_error("watchlist", e)
-        return {"ok": False, "items": watchlist_list(), "updated_at": _now_iso(), "message": f"云端移除失败，请稍后重试：{e}"}
+        return {
+            "ok": False,
+            "items": watchlist_list(),
+            "updated_at": _now_iso(),
+            "message": f"云端移除失败，请稍后重试：{e}",
+        }
 
 
 def list_watchlist() -> List[str]:

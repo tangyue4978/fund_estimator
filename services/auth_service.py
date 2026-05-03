@@ -58,9 +58,9 @@ def _to_user_id(phone: str) -> str:
 def register_user(phone: str, password: str) -> Tuple[bool, str, str | None]:
     norm_phone = _normalize_phone(phone)
     if not _validate_phone(norm_phone):
-        return False, "手机号格式不正确（11位）", None
+        return False, "手机号格式不正确（需为 11 位中国大陆手机号）", None
     if not _validate_password(password):
-        return False, "密码至少6位", None
+        return False, "密码至少 6 位", None
     if not supabase_client.is_enabled():
         return False, "云端未配置，暂不可注册", None
 
@@ -96,7 +96,7 @@ def login_user(phone: str, password: str) -> Tuple[bool, str, str | None]:
     if not _validate_phone(norm_phone):
         return False, "手机号格式不正确", None
     if not _validate_password(password):
-        return False, "密码至少6位", None
+        return False, "密码至少 6 位", None
     if not supabase_client.is_enabled():
         return False, "云端未配置，暂不可登录", None
 

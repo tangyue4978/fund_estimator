@@ -14,8 +14,8 @@ paths.ensure_dirs()
 
 import streamlit as st
 
-from services.estimation_service import estimate_many
 from services.cloud_status_service import get_cloud_error
+from services.estimation_service import estimate_many
 from services.fund_service import get_fund_profile
 from services.trading_time import cn_market_phase, now_cn
 from services.watchlist_service import watchlist_add, watchlist_list, watchlist_remove
@@ -78,7 +78,7 @@ def _build_watchlist_rows(codes: list[str]) -> tuple[list[dict], dict]:
                     "time": "",
                     "method": "",
                     "conf": "",
-                    "warn": "无估值数据",
+                    "warn": "暂无估值数据",
                 }
             )
             continue
@@ -137,7 +137,7 @@ def render_watchlist() -> None:
 
     codes = watchlist_list()
     if not codes:
-        st.info("自选为空：输入代码点击添加。")
+        st.info("自选为空：输入代码后点击添加。")
         return
 
     refresh_sec = _home_refresh_sec()
@@ -145,6 +145,7 @@ def render_watchlist() -> None:
     est_map = {}
     live_watchlist_area = st.container()
     if use_fragment_refresh:
+
         @st.fragment(run_every=f"{refresh_sec}s")
         def _live_watchlist_fragment() -> None:
             with live_watchlist_area:

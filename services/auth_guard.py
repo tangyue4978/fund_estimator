@@ -4,16 +4,16 @@ import base64
 import hashlib
 import hmac
 import json
-from datetime import datetime, timedelta
 import os
 import uuid
+from datetime import datetime, timedelta
 
 import streamlit as st
 import streamlit.components.v1 as components
 
 from config import settings
-from services.auth_service import DEFAULT_DEVELOPER, login_user, register_user
 from services import supabase_client
+from services.auth_service import DEFAULT_DEVELOPER, login_user, register_user
 from storage import paths
 from storage.json_store import ensure_json_file_with_schema, update_json
 
@@ -385,7 +385,7 @@ def require_login() -> str:
         with st.form("register_form"):
             st.text_input("开发者", value=DEFAULT_DEVELOPER, disabled=True)
             phone = st.text_input("手机号（注册）", placeholder="请输入手机号")
-            password = st.text_input("密码（至少6位）", type="password")
+            password = st.text_input("密码（至少 6 位）", type="password")
             password2 = st.text_input("确认密码", type="password")
             submitted = st.form_submit_button("注册")
         if submitted:
