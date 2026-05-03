@@ -338,7 +338,7 @@ def _render_live_detail(date_str: str) -> None:
     df_pos = pd.DataFrame(view["positions"])
     if not df_pos.empty:
         df_pos["fund_name"] = df_pos["code"].apply(
-            lambda c: (get_fund_profile(str(c)).name or "").strip() if str(c).strip() else ""
+            lambda c: ((get_fund_profile(str(c)).name or "").strip() or f"基金{str(c).strip()}") if str(c).strip() else ""
         )
         df_pos["input_amount"] = df_pos.apply(
             lambda r: float(r.get("shares", 0.0) or 0.0) * float(r.get("avg_cost_nav", 0.0) or 0.0),

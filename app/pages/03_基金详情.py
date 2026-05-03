@@ -115,13 +115,23 @@ def _render_live_estimate_and_chart(code: str, chart_type: str, range_value: str
         return
 
     df_chart = pd.DataFrame(points)
+    line_color = "#344054"
+    try:
+        first_value = float(df_chart["value"].iloc[0])
+        last_value = float(df_chart["value"].iloc[-1])
+        if last_value > first_value:
+            line_color = "#d92d20"
+        elif last_value < first_value:
+            line_color = "#039855"
+    except Exception:
+        pass
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
             x=df_chart["date"],
             y=df_chart["value"],
             mode="lines",
-            line=dict(width=2),
+            line=dict(width=2, color=line_color),
             name=chart_type,
             hovertemplate="日期: %{x}<br>数值: %{y}<extra></extra>",
         )

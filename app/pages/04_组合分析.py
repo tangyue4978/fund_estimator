@@ -1,4 +1,5 @@
 import sys
+import math
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -27,13 +28,32 @@ from services.trading_time import now_cn
 st.set_page_config(page_title="Portfolio Analysis", layout="wide")
 require_login()
 
+UP_COLOR = "#d92d20"
+DOWN_COLOR = "#039855"
+NEUTRAL_COLOR = "#344054"
+
+
+def _signed_color(value: object) -> str:
+    try:
+        num = float(value or 0.0)
+    except Exception:
+        num = 0.0
+    if num > 0:
+        return f"color: {UP_COLOR}"
+    if num < 0:
+        return f"color: {DOWN_COLOR}"
+    return f"color: {NEUTRAL_COLOR}"
+
 
 def _fund_name_safe(code: str) -> str:
-    try:
-        profile = get_fund_profile(str(code))
-        return (profile.name or "").strip()
-    except Exception:
+    code_s = str(code or "").strip()
+    if not code_s:
         return ""
+    try:
+        profile = get_fund_profile(code_s)
+        return (profile.name or "").strip() or f"基金{code_s}"
+    except Exception:
+        return f"基金{code_s}"
 
 
 def _load_view(date_str: str) -> dict:
@@ -55,6 +75,16 @@ def _render_curve() -> None:
         return
 
     df_curve = pd.DataFrame(curve_rows)
+    line_color = NEUTRAL_COLOR
+    try:
+        first_index = float(df_curve["portfolio_index"].iloc[0])
+        latest_index = float(df_curve["portfolio_index"].iloc[-1])
+        if latest_index > first_index:
+            line_color = UP_COLOR
+        elif latest_index < first_index:
+            line_color = DOWN_COLOR
+    except Exception:
+        pass
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -62,6 +92,7 @@ def _render_curve() -> None:
             y=df_curve["portfolio_index"],
             mode="lines+markers",
             name="组合规模指数",
+            line=dict(color=line_color, width=2),
             hovertemplate="日期: %{x}<br>指数: %{y:.2f}<extra></extra>",
         )
     )
@@ -75,8 +106,10 @@ def _render_curve() -> None:
     st.plotly_chart(fig, use_container_width=True)
 
     latest = df_curve.iloc[-1]
+    first = df_curve.iloc[0]
+    index_delta = float(latest["portfolio_index"]) - float(first["portfolio_index"])
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("最新指数", f"{float(latest['portfolio_index']):.2f}")
+    c1.metric("最新指数", f"{float(latest['portfolio_index']):.2f}", delta=f"{index_delta:+.2f}")
     c2.metric("组合市值", f"{float(latest['total_value']):.2f}")
     c3.metric("累计盈亏", f"{float(latest['total_pnl']):.2f}")
     c4.metric("累计收益率", f"{float(latest['total_pnl_pct']):.2f}%")
@@ -92,6 +125,16 @@ def _render_attribution(date_str: str) -> None:
         return
 
     df_attr = pd.DataFrame(rows)
+    total_today = float(pd.to_numeric(df_attr["today_pnl"], errors="coerce").fillna(0.0).sum())
+    positive_count = int((pd.to_numeric(df_attr["today_pnl"], errors="coerce").fillna(0.0) > 0).sum())
+    negative_count = int((pd.to_numeric(df_attr["today_pnl"], errors="coerce").fillna(0.0) < 0).sum())
+    top_driver = rows[0] if rows else {}
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("今日预计收益", f"{total_today:.2f}")
+    a2.metric("正贡献/负贡献", f"{positive_count}/{negative_count}")
+    a3.metric("最大驱动", str(top_driver.get("code", "-")))
+    a4.metric("驱动收益", f"{float(top_driver.get('today_pnl', 0.0) or 0.0):.2f}")
+
     df_attr["fund_name"] = df_attr["code"].apply(_fund_name_safe)
     df_attr = df_attr.rename(
         columns={
@@ -121,7 +164,12 @@ def _render_attribution(date_str: str) -> None:
     for col in ["仓位占比(%)", "今日预计收益", "今日贡献占比(%)", "累计收益", "累计收益率(%)", "置信度"]:
         if col in df_attr.columns:
             df_attr[col] = pd.to_numeric(df_attr[col], errors="coerce").round(2)
-    st.dataframe(df_attr[[c for c in show_cols if c in df_attr.columns]], width="stretch", hide_index=True)
+    df_show = df_attr[[c for c in show_cols if c in df_attr.columns]]
+    styler = df_show.style
+    for col in ["今日预计收益", "累计收益", "累计收益率(%)"]:
+        if col in df_show.columns:
+            styler = styler.map(_signed_color, subset=[col])
+    st.dataframe(styler, width="stretch", hide_index=True)
 
 
 def _render_targets(date_str: str) -> None:
@@ -177,6 +225,20 @@ def _render_targets(date_str: str) -> None:
     if not saved_rows:
         return
     df_target = pd.DataFrame(saved_rows)
+    target_pct_series = pd.to_numeric(df_target.get("target_pct", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    deviation_series = pd.to_numeric(df_target.get("deviation_amount", pd.Series(dtype=float)), errors="coerce").fillna(0.0).abs()
+    target_sum = float(target_pct_series.sum())
+    max_deviation = float(deviation_series.max()) if not deviation_series.empty else 0.0
+    if not math.isfinite(max_deviation):
+        max_deviation = 0.0
+    need_adjust_count = int((deviation_series > 1.0).sum())
+    t1, t2, t3 = st.columns(3)
+    t1.metric("目标仓位合计", f"{target_sum:.2f}%")
+    t2.metric("最大偏离金额", f"{max_deviation:.2f}")
+    t3.metric("需关注标的", need_adjust_count)
+    if target_sum > 0 and abs(target_sum - 100.0) > 0.01:
+        st.warning(f"目标仓位合计为 {target_sum:.2f}%，建议按组合口径调整到 100%。")
+
     df_target["fund_name"] = df_target["code"].apply(_fund_name_safe)
     df_target = df_target.rename(
         columns={
@@ -192,11 +254,11 @@ def _render_targets(date_str: str) -> None:
     for col in ["当前占比(%)", "目标占比(%)", "偏离(%)", "偏离金额", "预估市值"]:
         if col in df_target.columns:
             df_target[col] = pd.to_numeric(df_target[col], errors="coerce").round(2)
-    st.dataframe(
-        df_target[["基金代码", "基金名称", "当前占比(%)", "目标占比(%)", "偏离(%)", "偏离金额", "预估市值"]],
-        width="stretch",
-        hide_index=True,
-    )
+    target_show = df_target[["基金代码", "基金名称", "当前占比(%)", "目标占比(%)", "偏离(%)", "偏离金额", "预估市值"]]
+    target_styler = target_show.style
+    for col in ["偏离(%)", "偏离金额"]:
+        target_styler = target_styler.map(_signed_color, subset=[col])
+    st.dataframe(target_styler, width="stretch", hide_index=True)
 
 
 def _render_health() -> None:
@@ -207,6 +269,12 @@ def _render_health() -> None:
     if df_issues.empty:
         st.info("暂无检查结果。")
         return
+    level_counts = df_issues["level"].value_counts()
+    h1, h2, h3, h4 = st.columns(4)
+    h1.metric("错误", int(level_counts.get("error", 0)))
+    h2.metric("警告", int(level_counts.get("warning", 0)))
+    h3.metric("提示", int(level_counts.get("info", 0)))
+    h4.metric("通过", int(level_counts.get("success", 0)))
     level_order = {"error": 0, "warning": 1, "info": 2, "success": 3}
     df_issues["_order"] = df_issues["level"].map(level_order).fillna(9)
     df_issues = df_issues.sort_values(["_order", "scope"], kind="stable").drop(columns=["_order"])

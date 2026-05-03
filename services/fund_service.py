@@ -132,7 +132,7 @@ def get_fund_profile(code: str, *, force_refresh: bool = False) -> FundProfile:
 
     if not force_refresh:
         cached = fund_cache_get(code)
-        if cached:
+        if cached and str(cached.name or "").strip():
             return cached
 
     profile = _build_profile_from_quote(code)

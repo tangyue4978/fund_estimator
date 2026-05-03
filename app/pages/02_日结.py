@@ -65,7 +65,8 @@ def render_ledger():
     st.divider()
     st.subheader("维护工具")
 
-    if st.button("一键修复：删除超卖 SELL 流水（防止回放穿仓）"):
+    confirm_fix_bad_sells = st.checkbox("我确认删除检测到的超卖 SELL 流水", value=False)
+    if st.button("一键修复：删除超卖 SELL 流水（防止回放穿仓）", disabled=not confirm_fix_bad_sells):
         n = fix_bad_sells_in_adjustments()
         st.toast(f"已删除异常 SELL 条数：{n}", icon="🧹")
         st.rerun()
@@ -105,7 +106,29 @@ def render_ledger():
         return
 
     items = sorted(items, key=lambda x: (x.get("date", ""), x.get("code", "")), reverse=True)
-    st.dataframe(items, width="stretch", hide_index=True)
+    total_count = len(items)
+    settled_count = sum(1 for item in items if str(item.get("settle_status", "")) == "settled")
+    pending_count = sum(1 for item in items if str(item.get("settle_status", "")) == "estimated_only")
+    latest_date = str(items[0].get("date", "-")) if items else "-"
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("台账记录", total_count)
+    m2.metric("已覆盖官方净值", settled_count)
+    m3.metric("待覆盖估算", pending_count)
+    m4.metric("最近日期", latest_date)
+
+    status_label = st.radio("台账状态", ["全部", "已覆盖官方净值", "待覆盖估算"], horizontal=True)
+    code_query = st.text_input("按基金代码筛选", value="", placeholder="输入代码片段，例如 510300")
+    filtered_items = items
+    if status_label == "已覆盖官方净值":
+        filtered_items = [item for item in filtered_items if str(item.get("settle_status", "")) == "settled"]
+    elif status_label == "待覆盖估算":
+        filtered_items = [item for item in filtered_items if str(item.get("settle_status", "")) == "estimated_only"]
+    code_query = code_query.strip()
+    if code_query:
+        filtered_items = [item for item in filtered_items if code_query in str(item.get("code", ""))]
+
+    st.caption(f"当前显示 {len(filtered_items)} / {len(items)} 条记录。")
+    st.dataframe(filtered_items, width="stretch", hide_index=True)
 
 
 render_ledger()

@@ -13,6 +13,7 @@ from config import settings
 paths.ensure_dirs()
 
 import streamlit as st
+import pandas as pd
 
 from services.cloud_status_service import get_cloud_error
 from services.estimation_service import estimate_many
@@ -85,7 +86,7 @@ def _build_watchlist_rows(codes: list[str]) -> tuple[list[dict], dict]:
         rows.append(
             {
                 "code": code_item,
-                "name": est.name,
+                "name": str(est.name or "").strip() or f"基金{code_item}",
                 "est_nav": est.est_nav,
                 "pct": f"{est.est_change_pct:.2f}%",
                 "time": est.est_time,
@@ -97,13 +98,60 @@ def _build_watchlist_rows(codes: list[str]) -> tuple[list[dict], dict]:
     return rows, est_map
 
 
-def _render_watchlist_live(codes: list[str]) -> dict:
+WATCHLIST_COLUMNS = ["code", "name", "est_nav", "pct", "time", "method", "conf", "warn"]
+
+
+def _render_watchlist_live(codes: list[str], sort_by: str = "默认", warn_only: bool = False) -> dict:
     rows, est_map = _build_watchlist_rows(codes)
+    valid_estimates = [est for est in est_map.values() if est]
+    if valid_estimates:
+        avg_pct = sum(float(est.est_change_pct or 0.0) for est in valid_estimates) / len(valid_estimates)
+        up_count = sum(1 for est in valid_estimates if float(est.est_change_pct or 0.0) > 0)
+        down_count = sum(1 for est in valid_estimates if float(est.est_change_pct or 0.0) < 0)
+        warn_count = sum(1 for est in valid_estimates if str(est.warning or "").strip())
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("自选数量", len(codes))
+        m2.metric("平均涨跌幅", f"{avg_pct:.2f}%")
+        m3.metric("上涨/下跌", f"{up_count}/{down_count}")
+        m4.metric("提示数", warn_count)
+
+    def _row_pct(row: dict) -> float:
+        try:
+            return float(str(row.get("pct", "0")).replace("%", "") or 0.0)
+        except Exception:
+            return 0.0
+
+    def _row_conf(row: dict) -> float:
+        try:
+            return float(row.get("conf", 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
+    if warn_only:
+        rows = [row for row in rows if str(row.get("warn", "") or "").strip()]
+    if sort_by == "涨跌幅":
+        rows = sorted(rows, key=_row_pct, reverse=True)
+    elif sort_by == "置信度":
+        rows = sorted(rows, key=_row_conf)
+
     st.caption(f"更新时间：{now_cn().isoformat(timespec='seconds')}（仅展示线上估值）")
     row_height = 35
     header_height = 38
     table_height = header_height + max(1, len(rows)) * row_height
-    st.dataframe(rows, width="stretch", hide_index=True, height=table_height)
+    if rows:
+        def _color_pct(row: dict) -> list[str]:
+            pct = _row_pct(row)
+            color = "#d92d20" if pct > 0 else ("#039855" if pct < 0 else "#344054")
+            return [f"color: {color}" if col == "pct" else "" for col in row.index]
+
+        st.dataframe(
+            pd.DataFrame(rows, columns=WATCHLIST_COLUMNS).style.apply(_color_pct, axis=1),
+            width="stretch",
+            hide_index=True,
+            height=table_height,
+        )
+    else:
+        st.dataframe(pd.DataFrame(rows, columns=WATCHLIST_COLUMNS), width="stretch", hide_index=True, height=table_height)
     return est_map
 
 
@@ -140,6 +188,8 @@ def render_watchlist() -> None:
         st.info("自选为空：输入代码后点击添加。")
         return
 
+    sort_by = st.radio("列表排序", ["默认", "涨跌幅", "置信度"], horizontal=True)
+    warn_only = st.toggle("只看有提示的基金", value=False)
     refresh_sec = _home_refresh_sec()
     use_fragment_refresh = _home_fragment_refresh_enabled()
     est_map = {}
@@ -149,13 +199,13 @@ def render_watchlist() -> None:
         @st.fragment(run_every=f"{refresh_sec}s")
         def _live_watchlist_fragment() -> None:
             with live_watchlist_area:
-                _render_watchlist_live(codes)
+                _render_watchlist_live(codes, sort_by=sort_by, warn_only=warn_only)
 
         _live_watchlist_fragment()
         _, est_map = _build_watchlist_rows(codes)
     else:
         with live_watchlist_area:
-            est_map = _render_watchlist_live(codes)
+            est_map = _render_watchlist_live(codes, sort_by=sort_by, warn_only=warn_only)
 
     def _fund_name(code_item: str) -> str:
         est = est_map.get(code_item)
