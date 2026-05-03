@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -58,11 +58,7 @@ def _pick_code_from_query_or_select() -> str:
         if isinstance(code, list):
             code = code[0] if code else ""
     except Exception:
-        try:
-            qp = st.experimental_get_query_params()
-            code = qp.get("code", [""])[0]
-        except Exception:
-            code = ""
+        code = ""
 
     code = (code or "").strip()
     options = list(watchlist_list())

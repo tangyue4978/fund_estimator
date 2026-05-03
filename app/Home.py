@@ -177,15 +177,7 @@ def render_watchlist() -> None:
     st.subheader("查看基金详情")
     selected = st.selectbox("选择一个基金打开详情页", options=codes, format_func=_fmt_code)
     if st.button("打开详情页", width="stretch"):
-        try:
-            st.query_params["code"] = selected
-        except Exception:
-            try:
-                params = st.experimental_get_query_params()
-                params["code"] = [selected]
-                st.experimental_set_query_params(**params)
-            except Exception:
-                st.experimental_set_query_params(code=selected)
+        st.query_params["code"] = selected
         st.switch_page("pages/03_基金详情.py")
 
     st.divider()

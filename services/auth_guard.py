@@ -131,25 +131,9 @@ def _verify_signed_session(token: str) -> dict:
 def _clear_legacy_auth_query_params() -> None:
     try:
         qp = st.query_params
-        changed = False
         for key in ("sid", "uid", "phone"):
             if key in qp:
                 del qp[key]
-                changed = True
-        if changed:
-            return
-    except Exception:
-        pass
-
-    try:
-        params = st.experimental_get_query_params()
-        changed = False
-        for key in ("sid", "uid", "phone"):
-            if key in params:
-                params.pop(key, None)
-                changed = True
-        if changed:
-            st.experimental_set_query_params(**params)
     except Exception:
         pass
 
