@@ -35,6 +35,50 @@ def _is_ui_edit_item(it: dict) -> bool:
     )
 
 
+def _add_cost_basis_rebalance(
+    *,
+    effective_date: str,
+    code: str,
+    shares: float,
+    current_avg: float,
+    target_avg: float,
+    note: Optional[str],
+) -> None:
+    if shares <= 0:
+        return
+    if target_avg <= 0:
+        raise ValueError("avg_cost_nav_end must be > 0 when shares_end > 0")
+    if abs(current_avg - target_avg) <= 1e-9:
+        return
+
+    if target_avg > current_avg:
+        rebalance_shares = shares
+        buy_price = max(0.000001, 2.0 * target_avg - current_avg)
+    else:
+        low_price = max(0.000001, target_avg * 0.5)
+        rebalance_shares = shares * (current_avg - target_avg) / max(target_avg - low_price, 1e-9)
+        buy_price = low_price
+
+    add_adjustment(
+        type="BUY",
+        code=code,
+        effective_date=effective_date,
+        shares=float(rebalance_shares),
+        price=float(buy_price),
+        note=note or "edit->COST_REBALANCE_BUY",
+        source="ui_edit",
+    )
+    add_adjustment(
+        type="SELL",
+        code=code,
+        effective_date=effective_date,
+        shares=float(rebalance_shares),
+        price=float(target_avg),
+        note=note or "edit->COST_REBALANCE_SELL",
+        source="ui_edit",
+    )
+
+
 def apply_position_edit(
     *,
     effective_date: str,
@@ -48,8 +92,9 @@ def apply_position_edit(
     Convert edited end-of-day position target into adjustment rows.
     Overwrite only same-day UI-edit rows (source=ui_edit), keeping manual rows intact.
 
-    MVP behavior:
-    - BUY/SELL price uses avg_cost_nav_end from input
+    Behavior:
+    - shares delta is represented as BUY/SELL
+    - cost basis changes are represented by a paired BUY/SELL rebalance
     - realized delta is aligned by CASH_ADJ
     """
     code = (code or "").strip()
@@ -103,6 +148,21 @@ def apply_position_edit(
                 )
 
         # 2) realized delta -> CASH_ADJ
+        # Align cost basis before realized pnl, because the rebalance can create rows.
+        cur_map = _get_snapshot_map(effective_date)
+        cur_after = cur_map.get(code, {})
+        cur_sh_after = float(cur_after.get("shares_end", 0.0) or 0.0)
+        cur_avg_after = float(cur_after.get("avg_cost_nav_end", 0.0) or 0.0)
+        _add_cost_basis_rebalance(
+            effective_date=effective_date,
+            code=code,
+            shares=cur_sh_after,
+            current_avg=cur_avg_after,
+            target_avg=float(avg_cost_nav_end),
+            note=note,
+        )
+
+        # 3) realized delta -> CASH_ADJ
         # SELL may create realized pnl by itself; CASH_ADJ aligns final target.
         cur_map = _get_snapshot_map(effective_date)
         cur_real_after = float(cur_map.get(code, {}).get("realized_pnl_end", 0.0))

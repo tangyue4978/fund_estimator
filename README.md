@@ -22,4 +22,4 @@ This branch is the web-only version of Fund Estimator.
 - Local packaging, desktop launcher, and mobile shell have been split to branch `local-packaging`.
 - Supabase is required for auth, watchlist sync, adjustments, and daily ledger data.
 - Set `SUPABASE_URL` and `SUPABASE_KEY` in `.streamlit/secrets.toml` for local development.
-- Browser refresh keeps login via a browser cookie backed by a server-side session store; the session id is no longer placed in the URL.
+- Browser refresh keeps login via a signed browser cookie; the session id is no longer placed in the URL.

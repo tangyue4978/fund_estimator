@@ -43,6 +43,38 @@ def _normalize_items(items: list[Any]) -> List[str]:
     return out
 
 
+def _cache_key() -> str:
+    return f"_watchlist_cache_{_current_user_id()}"
+
+
+def _read_cached_items() -> List[str]:
+    try:
+        import streamlit as st  # type: ignore
+
+        cached = st.session_state.get(_cache_key(), [])
+        return _normalize_items(cached if isinstance(cached, list) else [])
+    except Exception:
+        return []
+
+
+def _write_cached_items(items: List[str]) -> None:
+    try:
+        import streamlit as st  # type: ignore
+
+        st.session_state[_cache_key()] = list(items)
+    except Exception:
+        pass
+
+
+def _clear_cached_items() -> None:
+    try:
+        import streamlit as st  # type: ignore
+
+        st.session_state.pop(_cache_key(), None)
+    except Exception:
+        pass
+
+
 def _load_remote_items() -> List[str]:
     uid = _current_user_id()
     rows = supabase_client.get_rows(
@@ -66,11 +98,12 @@ def watchlist_list() -> List[str]:
         return []
     try:
         items = _load_remote_items()
+        _write_cached_items(items)
         clear_cloud_error("watchlist")
         return items
     except Exception as e:
         set_cloud_error("watchlist", e)
-        return []
+        return _read_cached_items()
 
 
 def watchlist_add_result(code: str) -> Dict[str, Any]:
@@ -107,6 +140,7 @@ def watchlist_add_result(code: str) -> Dict[str, Any]:
             resp = supabase_client.insert_row("app_watchlist", {"user_id": uid, "code": code_n})
             if resp.status_code not in (200, 201, 409):
                 raise RuntimeError(f"watchlist add failed({resp.status_code})")
+        _clear_cached_items()
     except Exception as e:
         set_cloud_error("watchlist", e)
         return {
@@ -149,6 +183,7 @@ def watchlist_remove(code: str) -> dict:
         )
         if resp.status_code not in (200, 204):
             raise RuntimeError(f"watchlist remove failed({resp.status_code})")
+        _clear_cached_items()
         return {"ok": True, "items": watchlist_list(), "updated_at": _now_iso()}
     except Exception as e:
         set_cloud_error("watchlist", e)

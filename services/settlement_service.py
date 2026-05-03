@@ -29,6 +29,41 @@ def _today_str() -> str:
     return datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
 
 
+def _ledger_cache_key() -> str:
+    return f"_daily_ledger_cache_{paths.current_user_id()}"
+
+
+def _read_cached_ledger() -> dict:
+    try:
+        import streamlit as st  # type: ignore
+
+        cached = st.session_state.get(_ledger_cache_key(), {})
+        if isinstance(cached, dict) and isinstance(cached.get("items"), list):
+            return {"items": [x for x in cached.get("items", []) if isinstance(x, dict)]}
+    except Exception:
+        pass
+    return {"items": []}
+
+
+def _write_cached_ledger(ledger: dict) -> None:
+    try:
+        import streamlit as st  # type: ignore
+
+        items = ledger.get("items", []) if isinstance(ledger, dict) else []
+        st.session_state[_ledger_cache_key()] = {"items": [x for x in items if isinstance(x, dict)]}
+    except Exception:
+        pass
+
+
+def _clear_ledger_cache() -> None:
+    try:
+        import streamlit as st  # type: ignore
+
+        st.session_state.pop(_ledger_cache_key(), None)
+    except Exception:
+        pass
+
+
 def _load_ledger() -> dict:
     if not supabase_client.is_enabled():
         clear_cloud_error("daily_ledger")
@@ -47,11 +82,13 @@ def _load_ledger() -> dict:
             },
         )
         items = [x for x in rows if isinstance(x, dict)]
+        ledger = {"items": items}
+        _write_cached_ledger(ledger)
         clear_cloud_error("daily_ledger")
-        return {"items": items}
+        return ledger
     except Exception as e:
         set_cloud_error("daily_ledger", e)
-        return {"items": []}
+        return _read_cached_ledger()
 
 
 def get_ledger_items() -> list[dict]:
@@ -103,6 +140,7 @@ def finalize_estimated_close(date_str: Optional[str] = None) -> dict:
                 resp = supabase_client.delete_rows("app_daily_ledger", {"user_id": f"eq.{uid}", "date": f"eq.{d}"})
                 if resp.status_code not in (200, 204):
                     raise RuntimeError(f"finalize cleanup failed({resp.status_code})")
+                _clear_ledger_cache()
             return _load_ledger()
 
         stale_codes = sorted(
@@ -161,6 +199,7 @@ def finalize_estimated_close(date_str: Optional[str] = None) -> dict:
             resp = supabase_client.upsert_rows("app_daily_ledger", upserts, on_conflict="user_id,date,code")
             if resp.status_code not in (200, 201):
                 raise RuntimeError(f"finalize upsert failed({resp.status_code})")
+        _clear_ledger_cache()
         return _load_ledger()
     except Exception as e:
         raise RuntimeError(f"finalize_estimated_close cloud failed: {e}") from e
@@ -214,6 +253,7 @@ def settle_day(date_str: str) -> Tuple[dict, int]:
             resp = supabase_client.upsert_rows("app_daily_ledger", upserts, on_conflict="user_id,date,code")
             if resp.status_code not in (200, 201):
                 raise RuntimeError(f"settle upsert failed({resp.status_code})")
+        _clear_ledger_cache()
         return _load_ledger(), settled
     except Exception as e:
         raise RuntimeError(f"settle_day cloud failed: {e}") from e

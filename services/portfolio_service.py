@@ -31,6 +31,7 @@ def _load_daily_ledger_map(date_str: str) -> Dict[str, dict]:
     if not supabase_client.is_enabled():
         clear_cloud_error("portfolio_ledger")
         return {}
+    cache_key = f"_portfolio_ledger_map_{paths.current_user_id()}_{date_str}"
     try:
         rows = supabase_client.get_rows(
             "app_daily_ledger",
@@ -45,7 +46,13 @@ def _load_daily_ledger_map(date_str: str) -> Dict[str, dict]:
         )
     except Exception as e:
         set_cloud_error("portfolio_ledger", e)
-        return {}
+        try:
+            import streamlit as st  # type: ignore
+
+            cached = st.session_state.get(cache_key, {})
+            return cached if isinstance(cached, dict) else {}
+        except Exception:
+            return {}
 
     out: Dict[str, dict] = {}
     for row in rows:
@@ -54,6 +61,12 @@ def _load_daily_ledger_map(date_str: str) -> Dict[str, dict]:
         code = str(row.get("code", "")).strip()
         if code:
             out[code] = row
+    try:
+        import streamlit as st  # type: ignore
+
+        st.session_state[cache_key] = dict(out)
+    except Exception:
+        pass
     clear_cloud_error("portfolio_ledger")
     return out
 

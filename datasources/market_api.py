@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from dataclasses import dataclass
 from typing import Dict, List
 
@@ -99,7 +100,9 @@ def _fetch_tencent_quotes(codes: List[str]) -> Dict[str, StockQuote]:
         return {}
 
     url = f"https://qt.gtimg.cn/q={','.join(query_codes)}"
-    resp = get_text(cache_key=f"tencent_quote_{len(query_codes)}", url=url, ttl_sec=6, timeout_sec=4)
+    cache_key_raw = ",".join(sorted(set(query_codes)))
+    cache_key_hash = hashlib.sha1(cache_key_raw.encode("utf-8")).hexdigest()[:16]
+    resp = get_text(cache_key=f"tencent_quote_{cache_key_hash}", url=url, ttl_sec=6, timeout_sec=4)
     if not resp.ok or not resp.text:
         return {}
 

@@ -26,7 +26,7 @@ HTTP_TIMEOUT_SEC = 6
 HTTP_CACHE_TTL_SEC = 60
 
 # 是否保存原始响应到 data/raw
-SAVE_RAW_HTTP = True
+SAVE_RAW_HTTP = False
 
 # 重试次数（requests adapter）
 HTTP_RETRIES = 3

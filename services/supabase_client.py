@@ -4,6 +4,29 @@ import os
 from typing import Any, Dict, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+
+def _make_session() -> requests.Session:
+    session = requests.Session()
+    retries = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        status=3,
+        backoff_factor=0.4,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "PATCH", "DELETE"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+_SESSION = _make_session()
 
 
 def _load_from_streamlit_secrets(key: str) -> str:
@@ -45,7 +68,7 @@ def _headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
 
 def get_rows(table: str, params: Optional[Dict[str, str]] = None) -> list[dict]:
     url, _ = get_config()
-    resp = requests.get(
+    resp = _SESSION.get(
         f"{url}/rest/v1/{table}",
         params=params or {},
         headers=_headers(),
@@ -58,7 +81,7 @@ def get_rows(table: str, params: Optional[Dict[str, str]] = None) -> list[dict]:
 
 def insert_row(table: str, row: Dict[str, Any]) -> requests.Response:
     url, _ = get_config()
-    resp = requests.post(
+    resp = _SESSION.post(
         f"{url}/rest/v1/{table}",
         json=row,
         headers=_headers({"Prefer": "return=representation"}),
@@ -69,7 +92,7 @@ def insert_row(table: str, row: Dict[str, Any]) -> requests.Response:
 
 def upsert_rows(table: str, rows: list[Dict[str, Any]], on_conflict: str) -> requests.Response:
     url, _ = get_config()
-    resp = requests.post(
+    resp = _SESSION.post(
         f"{url}/rest/v1/{table}",
         params={"on_conflict": on_conflict},
         json=rows,
@@ -81,7 +104,7 @@ def upsert_rows(table: str, rows: list[Dict[str, Any]], on_conflict: str) -> req
 
 def delete_rows(table: str, params: Dict[str, str]) -> requests.Response:
     url, _ = get_config()
-    resp = requests.delete(
+    resp = _SESSION.delete(
         f"{url}/rest/v1/{table}",
         params=params,
         headers=_headers({"Prefer": "return=representation"}),
@@ -92,7 +115,7 @@ def delete_rows(table: str, params: Dict[str, str]) -> requests.Response:
 
 def update_rows(table: str, data: Dict[str, Any], params: Dict[str, str]) -> requests.Response:
     url, _ = get_config()
-    resp = requests.patch(
+    resp = _SESSION.patch(
         f"{url}/rest/v1/{table}",
         params=params,
         json=data,

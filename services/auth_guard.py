@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 from datetime import datetime, timedelta
+import os
 import uuid
 
 import streamlit as st
@@ -9,6 +13,7 @@ import streamlit.components.v1 as components
 
 from config import settings
 from services.auth_service import DEFAULT_DEVELOPER, login_user, register_user
+from services import supabase_client
 from storage import paths
 from storage.json_store import ensure_json_file_with_schema, update_json
 
@@ -46,6 +51,81 @@ def _cookie_secure_attr() -> str:
     except Exception:
         url = ""
     return "; Secure" if url.startswith("https://") else ""
+
+
+def _auth_cookie_secret() -> str:
+    for key in ("AUTH_COOKIE_SECRET", "SUPABASE_KEY"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    try:
+        value = st.secrets.get("AUTH_COOKIE_SECRET", "") or st.secrets.get("SUPABASE_KEY", "")
+        return str(value or "").strip()
+    except Exception:
+        return ""
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(raw: str) -> bytes:
+    padded = raw + ("=" * (-len(raw) % 4))
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def _sign_payload(payload_b64: str, secret: str) -> str:
+    return hmac.new(secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def _build_signed_session(phone: str, user_id: str) -> str:
+    secret = _auth_cookie_secret()
+    if not secret:
+        return ""
+    now = _now()
+    payload = {
+        "phone": str(phone),
+        "user_id": str(user_id),
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(days=_session_ttl_days())).timestamp()),
+        "v": 1,
+    }
+    payload_b64 = _b64url_encode(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    sig = _sign_payload(payload_b64, secret)
+    return f"v1.{payload_b64}.{sig}"
+
+
+def _verify_signed_session(token: str) -> dict:
+    token = str(token or "").strip()
+    if not token.startswith("v1."):
+        return {}
+    secret = _auth_cookie_secret()
+    if not secret:
+        return {}
+    parts = token.split(".", 2)
+    if len(parts) != 3:
+        return {}
+    _, payload_b64, sig = parts
+    expected = _sign_payload(payload_b64, secret)
+    if not hmac.compare_digest(sig, expected):
+        return {}
+    try:
+        payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    try:
+        exp = int(payload.get("exp", 0) or 0)
+    except Exception:
+        exp = 0
+    if exp <= int(_now().timestamp()):
+        return {}
+    phone = str(payload.get("phone", "") or "").strip()
+    user_id = str(payload.get("user_id", "") or "").strip()
+    if not phone or not user_id:
+        return {}
+    return {"phone": phone, "user_id": user_id}
 
 
 def _clear_legacy_auth_query_params() -> None:
@@ -101,6 +181,10 @@ def _clear_expired_sessions() -> None:
 
 
 def _persist_login_session(phone: str, user_id: str) -> str:
+    signed = _build_signed_session(phone, user_id)
+    if signed:
+        return signed
+
     _clear_expired_sessions()
     sid = uuid.uuid4().hex
     now = _now()
@@ -126,7 +210,7 @@ def _persist_login_session(phone: str, user_id: str) -> str:
 
 def _drop_persistent_session() -> None:
     sid = str(st.session_state.get("auth_session_id") or _read_sid_from_cookie()).strip()
-    if not sid:
+    if not sid or sid.startswith("v1."):
         return
 
     def updater(data: dict) -> dict:
@@ -200,6 +284,17 @@ def _restore_login_from_session() -> bool:
     if not sid:
         return False
 
+    signed = _verify_signed_session(sid)
+    if signed:
+        phone = str(signed.get("phone", ""))
+        user_id = str(signed.get("user_id", ""))
+        _set_login_state(phone, user_id, persist=False, sid=_build_signed_session(phone, user_id) or sid)
+        return True
+
+    if supabase_client.is_enabled() and _auth_cookie_secret():
+        _queue_cookie_sync("clear")
+        return False
+
     data = ensure_json_file_with_schema(_sessions_path(), _sessions_schema())
     sessions = data.get("sessions", {})
     if not isinstance(sessions, dict):
@@ -263,7 +358,8 @@ def require_login() -> str:
                 st.rerun()
         return str(st.session_state.get("auth_user_id"))
 
-    ensure_json_file_with_schema(_sessions_path(), _sessions_schema())
+    if not (supabase_client.is_enabled() and _auth_cookie_secret()):
+        ensure_json_file_with_schema(_sessions_path(), _sessions_schema())
     if _restore_login_from_session():
         st.rerun()
     _render_cookie_sync()

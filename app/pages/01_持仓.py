@@ -1,4 +1,5 @@
 ﻿import sys
+import time
 from pathlib import Path
 
 # ---- bootstrap: ensure project root in sys.path ----
@@ -69,6 +70,10 @@ def _remove_adjustments_by_code_safe(code: str) -> int:
 
 def _import_mode_value(label: str) -> str:
     return "sync" if "同步" in str(label or "") else "delta"
+
+
+def _clear_portfolio_view_cache() -> None:
+    st.session_state.pop("_portfolio_view_cache", None)
 
 
 def _render_image_import(date_str: str) -> None:
@@ -284,15 +289,26 @@ def _render_image_import(date_str: str) -> None:
                 result = apply_import_preview(preview)
             st.success(f"导入完成：已写入 {result['applied']} 条，跳过 {result['skipped']} 条。")
             st.session_state.pop("holding_image_preview", None)
+            _clear_portfolio_view_cache()
             st.rerun()
         except Exception as e:
             st.error(f"导入失败：{e}")
 
 
 def _load_portfolio_view(date_str: str) -> tuple[dict, float]:
+    now_ts = time.time()
+    today = now_cn().date().isoformat()
+    ttl = 8.0 if date_str == today else 60.0
+    cache = st.session_state.get("_portfolio_view_cache")
+    if isinstance(cache, dict) and cache.get("date") == date_str and (now_ts - float(cache.get("ts", 0.0))) <= ttl:
+        view_cached = cache.get("view", {})
+        if isinstance(view_cached, dict):
+            return view_cached, float(cache.get("today_est", 0.0) or 0.0)
+
     view = portfolio_realtime_view_as_of(date_str)
     pos_df = pd.DataFrame(view.get("positions", []))
     if pos_df.empty:
+        st.session_state["_portfolio_view_cache"] = {"date": date_str, "ts": now_ts, "view": view, "today_est": 0.0}
         return view, 0.0
     pct = pd.to_numeric(pos_df.get("est_change_pct", 0.0), errors="coerce").fillna(0.0)
     val = pd.to_numeric(pos_df.get("est_value", 0.0), errors="coerce").fillna(0.0)
@@ -301,6 +317,7 @@ def _load_portfolio_view(date_str: str) -> tuple[dict, float]:
     ok = denom.abs() > 1e-9
     if ok.any():
         today_est = float((val[ok] * pct[ok] / denom[ok]).sum())
+    st.session_state["_portfolio_view_cache"] = {"date": date_str, "ts": now_ts, "view": view, "today_est": today_est}
     return view, today_est
 
 
@@ -479,33 +496,38 @@ def render_portfolio():
     portfolio_ledger_err = get_cloud_error("portfolio_ledger")
     daily_ledger_err = get_cloud_error("daily_ledger")
     watchlist_err = get_cloud_error("watchlist")
+    adjustments_err = get_cloud_error("adjustments")
     if portfolio_ledger_err:
         st.warning(f"历史日结账本读取失败，过去日期视图可能缺少估值数据：{portfolio_ledger_err}")
     if daily_ledger_err:
         st.warning(f"日结数据读取失败，历史收益与误差分析可能为空：{daily_ledger_err}")
     if watchlist_err:
         st.warning(f"自选列表读取失败，编辑区候选基金可能不完整：{watchlist_err}")
+    if adjustments_err:
+        st.warning(f"持仓流水读取失败，当前显示的是最近一次成功读取的数据：{adjustments_err}")
 
     d = st.date_input("as_of 日期（用于编辑/回放）", value=now_cn().date())
     date_str = d.isoformat()
     live_date_str = now_cn().date().isoformat()
-    st.caption(f"实时估值仅展示当日数据：{live_date_str}")
-    if date_str != live_date_str:
-        st.info("当前选择的是历史日期；上方实时估值与明细仍按当日口径展示。")
+    is_today_view = date_str == live_date_str
+    if is_today_view:
+        st.caption(f"当前展示当日实时估值：{live_date_str}")
+    else:
+        st.info("当前展示所选历史日期的快照/日结数据；实时估值只用于当日。")
 
     refresh_sec = _portfolio_refresh_sec()
-    use_fragment_refresh = _portfolio_fragment_refresh_enabled()
+    use_fragment_refresh = is_today_view and _portfolio_fragment_refresh_enabled()
     live_summary_area = st.container()
     if use_fragment_refresh:
         @st.fragment(run_every=f"{refresh_sec}s")
         def _live_summary_fragment() -> None:
             with live_summary_area:
-                _render_live_summary(live_date_str)
+                _render_live_summary(date_str)
 
         _live_summary_fragment()
     else:
         with live_summary_area:
-            _render_live_summary(live_date_str)
+            _render_live_summary(date_str)
 
     st.subheader("组合口径：估算收盘 vs 官方净值")
 
@@ -605,12 +627,12 @@ def render_portfolio():
         @st.fragment(run_every=f"{refresh_sec}s")
         def _live_detail_fragment() -> None:
             with live_detail_area:
-                _render_live_detail(live_date_str)
+                _render_live_detail(date_str)
 
         _live_detail_fragment()
     else:
         with live_detail_area:
-            _render_live_detail(live_date_str)
+            _render_live_detail(date_str)
 
     st.divider()
     _render_image_import(date_str)
@@ -762,7 +784,8 @@ def render_portfolio():
                 realized_pnl_end=float(realized),
                 note=note,
             )
-            st.success("已写入流水（adjustments.json），并可回放快照。")
+            st.success("已写入云端流水，并可回放快照。")
+            _clear_portfolio_view_cache()
             st.rerun()
         except Exception as e:
             st.error(f"保存失败：{e}")
@@ -775,6 +798,7 @@ def render_portfolio():
         try:
             removed = _remove_adjustments_by_code_safe(code)
             st.success(f"已删除 {code} 的 {removed} 条流水记录。")
+            _clear_portfolio_view_cache()
             st.rerun()
         except Exception as e:
             st.error(f"删除失败：{e}")

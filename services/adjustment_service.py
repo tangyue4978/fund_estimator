@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from services import supabase_client
+from services.cloud_status_service import clear_cloud_error, set_cloud_error
 from storage import paths
 
 
@@ -26,6 +27,44 @@ def _looks_like_ui_edit(item: dict) -> bool:
         or note.startswith("ui edit")
         or (note.startswith("ui") and ("edit" in note or "编辑" in note))
     )
+
+
+def _cache_key(code: Optional[str] = None) -> str:
+    suffix = (code or "__all__").strip() or "__all__"
+    return f"_adjustments_cache_{paths.current_user_id()}_{suffix}"
+
+
+def _read_cached_adjustments(code: Optional[str] = None) -> List[dict]:
+    try:
+        import streamlit as st  # type: ignore
+
+        cached = st.session_state.get(_cache_key(code), [])
+        return [x for x in cached if isinstance(x, dict)] if isinstance(cached, list) else []
+    except Exception:
+        return []
+
+
+def _write_cached_adjustments(code: Optional[str], rows: List[dict]) -> None:
+    try:
+        import streamlit as st  # type: ignore
+
+        st.session_state[_cache_key(code)] = [x for x in rows if isinstance(x, dict)]
+        if code:
+            st.session_state.pop(_cache_key(None), None)
+    except Exception:
+        pass
+
+
+def _clear_adjustments_cache() -> None:
+    try:
+        import streamlit as st  # type: ignore
+
+        prefix = f"_adjustments_cache_{paths.current_user_id()}_"
+        for key in list(st.session_state.keys()):
+            if str(key).startswith(prefix):
+                st.session_state.pop(key, None)
+    except Exception:
+        pass
 
 
 def migrate_ui_edit_source(code: Optional[str] = None, effective_date: Optional[str] = None) -> int:
@@ -83,9 +122,13 @@ def list_adjustments(code: Optional[str] = None) -> List[dict]:
                 "app_adjustments",
                 params={**params_base, "select": "id,type,code,effective_date,shares,price,cash,note,created_at"},
             )
-        return [x for x in rows if isinstance(x, dict)]
-    except Exception:
-        return []
+        out = [x for x in rows if isinstance(x, dict)]
+        _write_cached_adjustments(code, out)
+        clear_cloud_error("adjustments")
+        return out
+    except Exception as e:
+        set_cloud_error("adjustments", e)
+        return _read_cached_adjustments(code)
 
 
 def add_adjustment(
@@ -145,6 +188,7 @@ def add_adjustment(
             resp = supabase_client.insert_row("app_adjustments", payload)
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"add adjustment failed({resp.status_code})")
+        _clear_adjustments_cache()
         return {"items": list_adjustments(), "updated_at": _now_iso()}
     except Exception as e:
         raise RuntimeError(f"add_adjustment cloud failed: {e}") from e
@@ -160,6 +204,7 @@ def remove_adjustment(adj_id: str) -> dict:
         resp = supabase_client.delete_rows("app_adjustments", {"user_id": f"eq.{paths.current_user_id()}", "id": f"eq.{adj_id}"})
         if resp.status_code not in (200, 204):
             raise RuntimeError(f"remove adjustment failed({resp.status_code})")
+        _clear_adjustments_cache()
         return {"items": list_adjustments(), "updated_at": _now_iso()}
     except Exception as e:
         raise RuntimeError(f"remove_adjustment cloud failed: {e}") from e
@@ -172,6 +217,7 @@ def clear_adjustments() -> None:
         resp = supabase_client.delete_rows("app_adjustments", {"user_id": f"eq.{paths.current_user_id()}"})
         if resp.status_code not in (200, 204):
             raise RuntimeError(f"clear adjustments failed({resp.status_code})")
+        _clear_adjustments_cache()
     except Exception as e:
         raise RuntimeError(f"clear_adjustments cloud failed: {e}") from e
 
@@ -188,6 +234,7 @@ def remove_adjustments_by_code(code: str) -> int:
         resp = supabase_client.delete_rows("app_adjustments", {"user_id": f"eq.{uid}", "code": f"eq.{code}"})
         if resp.status_code not in (200, 204):
             raise RuntimeError(f"remove by code failed({resp.status_code})")
+        _clear_adjustments_cache()
         return len(rows)
     except Exception as e:
         raise RuntimeError(f"remove_adjustments_by_code cloud failed: {e}") from e
@@ -239,6 +286,7 @@ def remove_adjustments_by_code_date(code: str, effective_date: str, source: Opti
                 resp = supabase_client.delete_rows("app_adjustments", query_params)
         if resp.status_code not in (200, 204):
             raise RuntimeError(f"remove by code+date failed({resp.status_code})")
+        _clear_adjustments_cache()
         return len(rows)
     except Exception as e:
         raise RuntimeError(f"remove_adjustments_by_code_date cloud failed: {e}") from e

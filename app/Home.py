@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,7 @@ import streamlit as st
 
 from services.estimation_service import estimate_many
 from services.cloud_status_service import get_cloud_error
+from services.fund_service import get_fund_profile
 from services.trading_time import cn_market_phase, now_cn
 from services.watchlist_service import watchlist_add, watchlist_list, watchlist_remove
 
@@ -45,8 +47,24 @@ def _home_fragment_refresh_enabled() -> bool:
     return auto_on and _home_refresh_sec() > 0 and hasattr(st, "fragment")
 
 
-def _build_watchlist_rows(codes: list[str]) -> tuple[list[dict], dict]:
+def _clear_home_est_cache() -> None:
+    st.session_state.pop("_home_est_cache", None)
+
+
+def _get_home_est_map(codes: list[str]) -> dict:
+    key = tuple(codes)
+    now_ts = time.time()
+    cache = st.session_state.get("_home_est_cache")
+    if isinstance(cache, dict) and cache.get("key") == key and (now_ts - float(cache.get("ts", 0.0))) <= 8.0:
+        est_map = cache.get("est_map", {})
+        return est_map if isinstance(est_map, dict) else {}
     est_map = estimate_many(codes)
+    st.session_state["_home_est_cache"] = {"key": key, "ts": now_ts, "est_map": est_map}
+    return est_map
+
+
+def _build_watchlist_rows(codes: list[str]) -> tuple[list[dict], dict]:
+    est_map = _get_home_est_map(codes)
     rows = []
     for code_item in codes:
         est = est_map.get(code_item)
@@ -94,7 +112,7 @@ def render_watchlist() -> None:
     st.sidebar.caption("列表估值数据会按交易时段自动局部刷新。")
     watchlist_err = get_cloud_error("watchlist")
     if watchlist_err:
-        st.warning(f"自选列表读取失败，当前页面可能显示为空数据：{watchlist_err}")
+        st.warning(f"自选列表读取失败，当前显示最近一次成功读取的数据：{watchlist_err}")
 
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
@@ -110,9 +128,11 @@ def render_watchlist() -> None:
             else:
                 watchlist_add(code.strip())
                 st.toast("已添加", icon="✅")
+            _clear_home_est_cache()
             st.rerun()
     with col3:
         if st.button("刷新估值", width="stretch"):
+            _clear_home_est_cache()
             st.rerun()
 
     codes = watchlist_list()
@@ -136,7 +156,18 @@ def render_watchlist() -> None:
         with live_watchlist_area:
             est_map = _render_watchlist_live(codes)
 
-    name_map = {c: ((est_map.get(c).name if est_map.get(c) else "") or f"基金{c}") for c in codes}
+    def _fund_name(code_item: str) -> str:
+        est = est_map.get(code_item)
+        name = (est.name if est else "") or ""
+        if name:
+            return name
+        try:
+            profile = get_fund_profile(code_item)
+            return (profile.name or "").strip() or f"基金{code_item}"
+        except Exception:
+            return f"基金{code_item}"
+
+    name_map = {c: _fund_name(c) for c in codes}
 
     def _fmt_code(code_item: str) -> str:
         return f"{code_item} - {name_map.get(code_item, '')}"
@@ -163,6 +194,7 @@ def render_watchlist() -> None:
         res = watchlist_remove(rm_code)
         if bool(res.get("ok", True)):
             st.toast("已移除", icon="🗑️")
+            _clear_home_est_cache()
             st.rerun()
         else:
             st.toast(str(res.get("message", "移除失败")), icon="❌")

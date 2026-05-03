@@ -114,8 +114,6 @@ def fetch_gsz_quotes(codes: List[str]) -> Dict[str, GszQuote]:
             q = _fetch_gsz_one_real(code)
             if q:
                 out[code] = q
-            else:
-                out.update(_fetch_gsz_quotes_mock([code]))
         return out
     except Exception:
-        return _fetch_gsz_quotes_mock(codes)
+        return out

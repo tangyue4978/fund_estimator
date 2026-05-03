@@ -83,6 +83,19 @@ def _estimate_from_gsz(code: str, name: str, q, *, method: str) -> EstimateResul
             est_time=q.gztime,
         )
 
+    if not q:
+        return EstimateResult(
+            code=code,
+            name=name,
+            est_nav=0.0,
+            est_change_pct=0.0,
+            method=constants.METHOD_FROZEN_NAV,
+            confidence=0.0,
+            warning="estimate data unavailable",
+            suggested_refresh_sec=60,
+            est_time=now_iso(),
+        )
+
     frozen_nav = q.nav if q and q.nav and q.nav > 0 else 0.0
     return EstimateResult(
         code=code,
