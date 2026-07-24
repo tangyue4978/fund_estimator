@@ -1,6 +1,7 @@
 ﻿import sys
 import time
 from pathlib import Path
+import hashlib
 
 # ---- bootstrap: ensure project root in sys.path ----
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -8,11 +9,22 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import streamlit as st
-from datetime import date, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
 
+from app.ui import (
+    action_error,
+    apply_app_style,
+    configure_page,
+    danger_container,
+    dataframe_height,
+    degraded_notice,
+    empty_state,
+    estimate_method_label,
+    page_header,
+    section_header,
+)
 from services.portfolio_service import portfolio_realtime_view_as_of
 from services.cloud_status_service import get_cloud_error
 from services.edit_bridge_service import apply_position_edit
@@ -26,16 +38,17 @@ from services.watchlist_service import watchlist_list
 from services.accuracy_service import portfolio_gap_summary, portfolio_gap_table
 from services.fund_service import get_fund_profile
 from services.estimation_service import estimate_one
-from services.history_service import get_fund_cumulative_pnl_on
-from services.vision_holdings_service import analyze_holdings_image
+from services.history_service import get_latest_fund_cumulative_pnl_before
+from services.vision_holdings_service import MAX_IMAGE_BYTES, analyze_holdings_image
 from services import adjustment_service
 from services.auth_guard import require_login
 from services.trading_time import cn_market_phase, now_cn
 from config import settings
 
 
-st.set_page_config(page_title="Portfolio", layout="wide")
-require_login()
+configure_page("持仓管理", icon="💼")
+apply_app_style()
+require_login(render_sidebar=False)
 
 
 def _portfolio_refresh_sec() -> int:
@@ -72,13 +85,51 @@ def _import_mode_value(label: str) -> str:
     return "sync" if "同步" in str(label or "") else "delta"
 
 
+def _import_mode_label(value: object) -> str:
+    raw = str(value or "").strip()
+    return {"sync": "同步持仓", "delta": "加减仓"}.get(raw, raw or "暂无")
+
+
+def _uploaded_files_signature(files: list) -> tuple:
+    signature = []
+    for file in files or []:
+        content = file.getvalue()
+        signature.append(
+            (
+                str(file.name or ""),
+                str(file.type or ""),
+                len(content),
+                hashlib.sha256(content).hexdigest(),
+            )
+        )
+    return tuple(signature)
+
+
 def _clear_portfolio_view_cache() -> None:
     st.session_state.pop("_portfolio_view_cache", None)
 
 
 def _render_image_import(date_str: str) -> None:
-    st.subheader("图片导入持仓")
-    st.caption("支持两种模式：同步持仓会覆盖到图片识别出的最终仓位；加减仓会在当前持仓基础上做增减。")
+    section_header(
+        "图片导入持仓",
+        "同步持仓会覆盖为图片中的最终仓位；加减仓只在当前持仓基础上做增减。",
+    )
+
+    last_import = st.session_state.get("holding_image_last_import")
+    if isinstance(last_import, dict):
+        with st.expander("最近一次图片导入", expanded=False):
+            st.write(
+                {
+                    "导入时间": last_import.get("time", "-"),
+                    "导入模式": _import_mode_label(last_import.get("mode")),
+                    "生效日期": last_import.get("effective_date", "-"),
+                    "写入条数": last_import.get("applied", 0),
+                    "跳过条数": last_import.get("skipped", 0),
+                    "有效预览": last_import.get("valid_count", 0),
+                    "错误预览": last_import.get("error_count", 0),
+                    "同步清零": last_import.get("clear_count", 0),
+                }
+            )
 
     if not holdings_image_import_enabled():
         st.info("未启用图片识别。请在 `.streamlit/secrets.toml` 配置 `GEMINI_API_KEY`，可选配置 `GEMINI_MODEL` 和 `GEMINI_API_BASE_URL`。")
@@ -97,12 +148,28 @@ def _render_image_import(date_str: str) -> None:
         accept_multiple_files=True,
         key="holding_image_files",
     )
+    file_signature = _uploaded_files_signature(files or [])
+    file_errors = []
+    if len(files or []) > 5:
+        file_errors.append("一次最多识别 5 张图片。")
+    total_upload_bytes = sum(item[2] for item in file_signature)
+    if total_upload_bytes > 25 * 1024 * 1024:
+        file_errors.append("本次图片总大小不能超过 25 MB。")
+    if any(item[2] > MAX_IMAGE_BYTES for item in file_signature):
+        file_errors.append("单张图片不能超过 10 MB。")
     if files:
         st.caption(f"已选择 {len(files)} 张图片，请点击“识别图片”。")
+    for message in file_errors:
+        st.error(message)
 
     col_recognize, col_clear = st.columns([1, 1])
     with col_recognize:
-        if st.button("识别图片", type="primary", disabled=not files, width="stretch"):
+        if st.button(
+            "识别图片",
+            type="primary",
+            disabled=not files or bool(file_errors),
+            width="stretch",
+        ):
             rows = []
             warnings = []
             status = {"level": "info", "message": "开始识别图片。"}
@@ -125,10 +192,12 @@ def _render_image_import(date_str: str) -> None:
                             if str(warn or "").strip():
                                 warnings.append(f"{file.name}: {warn}")
                     except Exception as e:
-                        warnings.append(f"{file.name}: 识别失败 - {e}")
+                        warnings.append(f"{file.name}: 识别失败（{type(e).__name__}，详细请求信息已隐藏）")
             st.session_state["holding_image_rows"] = rows
             st.session_state["holding_image_warnings"] = warnings
             st.session_state["holding_image_preview"] = None
+            st.session_state.pop("holding_image_preview_source", None)
+            st.session_state["holding_image_file_signature"] = file_signature
             st.session_state["holding_image_last_run"] = {
                 "file_count": len(files or []),
                 "row_count": len(rows),
@@ -144,10 +213,17 @@ def _render_image_import(date_str: str) -> None:
             st.session_state["holding_image_status"] = status
 
     with col_clear:
-        if st.button("清空识别结果", width="stretch"):
+        has_recognition_state = bool(
+            st.session_state.get("holding_image_rows")
+            or st.session_state.get("holding_image_warnings")
+            or st.session_state.get("holding_image_status")
+        )
+        if st.button("清空识别结果", width="stretch", disabled=not has_recognition_state):
             st.session_state.pop("holding_image_rows", None)
             st.session_state.pop("holding_image_warnings", None)
             st.session_state.pop("holding_image_preview", None)
+            st.session_state.pop("holding_image_preview_source", None)
+            st.session_state.pop("holding_image_file_signature", None)
             st.session_state.pop("holding_image_status", None)
             st.session_state.pop("holding_image_last_run", None)
             st.rerun()
@@ -170,7 +246,7 @@ def _render_image_import(date_str: str) -> None:
     if isinstance(last_run, dict):
         st.caption(
             "最近一次识别："
-            f" 模式={last_run.get('mode', '-')}"
+            f" 模式={_import_mode_label(last_run.get('mode'))}"
             f"，图片数={last_run.get('file_count', 0)}"
             f"，记录数={last_run.get('row_count', 0)}"
             f"，警告数={last_run.get('warning_count', 0)}"
@@ -182,6 +258,12 @@ def _render_image_import(date_str: str) -> None:
 
     rows = st.session_state.get("holding_image_rows", [])
     if not rows:
+        return
+    if st.session_state.get("holding_image_file_signature") != file_signature:
+        st.warning("上传图片已变化，请重新点击“识别图片”，旧识别结果不会被导入。")
+        return
+    if isinstance(last_run, dict) and str(last_run.get("mode", "")) != import_mode:
+        st.warning("图片导入方式已变化，请重新识别图片后再生成预览。")
         return
 
     raw_df = pd.DataFrame(rows)
@@ -202,11 +284,28 @@ def _render_image_import(date_str: str) -> None:
         hide_index=True,
         num_rows="dynamic",
         key="holding_image_editor",
+        height=dataframe_height(len(raw_df), max_rows=12),
         column_config={
-            "confidence": st.column_config.NumberColumn("置信度", format="%.2f"),
+            "source_image": st.column_config.TextColumn("来源图片"),
+            "code": st.column_config.TextColumn("基金代码"),
+            "fund_name": st.column_config.TextColumn("基金名称"),
+            "confidence": st.column_config.NumberColumn("识别置信度", format="%.2f"),
+            "notes": st.column_config.TextColumn("识别备注"),
+            "shares": st.column_config.NumberColumn("持有份额", format="%.4f"),
+            "avg_cost_nav": st.column_config.NumberColumn("平均成本净值", format="%.6f"),
+            "amount": st.column_config.NumberColumn("持仓金额（元）", format="%.2f"),
+            "cumulative_pnl": st.column_config.NumberColumn("累计收益（元）", format="%.2f"),
+            "daily_pnl": st.column_config.NumberColumn("当日收益（元）", format="%.2f"),
+            "pnl_pct": st.column_config.NumberColumn("收益率（%）", format="%.2f"),
+            "delta_shares": st.column_config.NumberColumn("增减份额", format="%.4f"),
+            "delta_amount": st.column_config.NumberColumn("增减金额（元）", format="%.2f"),
+            "avg_price": st.column_config.NumberColumn("成交均价", format="%.6f"),
+            "side": st.column_config.TextColumn("交易方向"),
         },
     )
 
+    editor_state = edited_df.to_json(orient="records", date_format="iso", force_ascii=False)
+    preview_source = f"{import_mode}|{date_str}|{editor_state}"
     if st.button("生成导入预览", width="stretch"):
         preview = build_import_preview(
             rows=edited_df.where(pd.notnull(edited_df), None).to_dict("records"),
@@ -214,9 +313,13 @@ def _render_image_import(date_str: str) -> None:
             effective_date=date_str,
         )
         st.session_state["holding_image_preview"] = preview
+        st.session_state["holding_image_preview_source"] = preview_source
 
     preview = st.session_state.get("holding_image_preview")
     if not isinstance(preview, dict):
+        return
+    if st.session_state.get("holding_image_preview_source") != preview_source:
+        st.info("识别结果已修改，请重新点击“生成导入预览”后再导入。")
         return
     if preview.get("mode") != import_mode or preview.get("effective_date") != date_str:
         st.info("导入模式或日期已变化，请重新点击“生成导入预览”。")
@@ -254,15 +357,21 @@ def _render_image_import(date_str: str) -> None:
             width="stretch",
             hide_index=True,
             column_config={
-                "current_shares": st.column_config.NumberColumn(format="%.4f"),
-                "delta_shares": st.column_config.NumberColumn(format="%.4f"),
-                "target_shares": st.column_config.NumberColumn(format="%.4f"),
-                "target_avg_cost_nav": st.column_config.NumberColumn(format="%.6f"),
-                "target_realized_pnl": st.column_config.NumberColumn(format="%.4f"),
-                "recognized_amount": st.column_config.NumberColumn(format="%.2f"),
-                "recognized_cumulative_pnl": st.column_config.NumberColumn(format="%.2f"),
-                "recognized_pnl_pct": st.column_config.NumberColumn(format="%.2f"),
+                "code": st.column_config.TextColumn("基金代码"),
+                "fund_name": st.column_config.TextColumn("基金名称"),
+                "operation": st.column_config.TextColumn("导入操作"),
+                "current_shares": st.column_config.NumberColumn("当前份额", format="%.4f"),
+                "delta_shares": st.column_config.NumberColumn("增减份额", format="%.4f"),
+                "target_shares": st.column_config.NumberColumn("目标份额", format="%.4f"),
+                "target_avg_cost_nav": st.column_config.NumberColumn("目标成本净值", format="%.6f"),
+                "target_realized_pnl": st.column_config.NumberColumn("目标已实现收益", format="%.4f"),
+                "recognized_amount": st.column_config.NumberColumn("识别金额（元）", format="%.2f"),
+                "recognized_cumulative_pnl": st.column_config.NumberColumn("识别累计收益（元）", format="%.2f"),
+                "recognized_pnl_pct": st.column_config.NumberColumn("识别收益率（%）", format="%.2f"),
+                "warnings": st.column_config.TextColumn("提示"),
+                "errors": st.column_config.TextColumn("错误"),
             },
+            height=dataframe_height(len(preview_df), max_rows=10),
         )
 
     if int(preview.get("error_count", 0) or 0) > 0:
@@ -287,12 +396,23 @@ def _render_image_import(date_str: str) -> None:
         try:
             with st.spinner("正在写入持仓流水..."):
                 result = apply_import_preview(preview)
+            st.session_state["holding_image_last_import"] = {
+                "time": now_cn().isoformat(timespec="seconds"),
+                "mode": preview.get("mode", import_mode),
+                "effective_date": preview.get("effective_date", date_str),
+                "applied": int(result.get("applied", 0) or 0),
+                "skipped": int(result.get("skipped", 0) or 0),
+                "valid_count": int(preview.get("valid_count", 0) or 0),
+                "error_count": int(preview.get("error_count", 0) or 0),
+                "clear_count": int(preview.get("clear_count", 0) or 0),
+            }
             st.success(f"导入完成：已写入 {result['applied']} 条，跳过 {result['skipped']} 条。")
             st.session_state.pop("holding_image_preview", None)
+            st.session_state.pop("holding_image_preview_source", None)
             _clear_portfolio_view_cache()
             st.rerun()
         except Exception as e:
-            st.error(f"导入失败：{e}")
+            action_error("导入失败，请检查预览内容后重试。", e)
 
 
 def _load_portfolio_view(date_str: str) -> tuple[dict, float]:
@@ -324,30 +444,41 @@ def _load_portfolio_view(date_str: str) -> tuple[dict, float]:
 def _render_live_summary(date_str: str) -> None:
     view, today_est = _load_portfolio_view(date_str)
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("总成本", f"{view['total_cost']:.2f}")
-    c2.metric("预估市值", f"{view['total_est_value']:.2f}")
-    c3.metric("预估盈亏", f"{view['total_est_pnl']:.2f}")
+    c1.metric("总成本", f"{view['total_cost']:.2f} 元")
+    c2.metric("预估市值", f"{view['total_est_value']:.2f} 元")
+    c3.metric("预估盈亏", f"{view['total_est_pnl']:.2f} 元")
     c4.metric("预估盈亏率", f"{view['total_est_pnl_pct']:.2f}%")
-    c5.metric("今日预计收益", f"{today_est:.2f}")
-    st.caption(f"估值覆盖率：{view['realtime_coverage_value_pct']:.2f}%")
+    c5.metric("今日预计收益", f"{today_est:.2f} 元")
+    st.caption(f"实时估值覆盖率：{view['realtime_coverage_value_pct']:.2f}%（官方净值兜底不计入实时覆盖）")
 
 
 def _render_live_detail(date_str: str) -> None:
     view, _ = _load_portfolio_view(date_str)
-    st.subheader("明细")
+    section_header("持仓明细", "按预估市值从高到低排列；表格超过 12 行时可在表内滚动。")
     df_pos = pd.DataFrame(view["positions"])
-    if not df_pos.empty:
-        df_pos["fund_name"] = df_pos["code"].apply(
-            lambda c: ((get_fund_profile(str(c)).name or "").strip() or f"基金{str(c).strip()}") if str(c).strip() else ""
+    if df_pos.empty:
+        empty_state(
+            "所选日期没有持仓",
+            "可在下方“编辑持仓”录入，或切换到已有持仓的日期。",
         )
+        return
+    if not df_pos.empty:
+        def _fund_name_safe(code_value: object) -> str:
+            code_text = str(code_value or "").strip()
+            if not code_text:
+                return ""
+            try:
+                return (get_fund_profile(code_text).name or "").strip() or f"基金{code_text}"
+            except Exception:
+                return f"基金{code_text}"
+
+        df_pos["fund_name"] = df_pos["code"].apply(_fund_name_safe)
         df_pos["input_amount"] = df_pos.apply(
             lambda r: float(r.get("shares", 0.0) or 0.0) * float(r.get("avg_cost_nav", 0.0) or 0.0),
             axis=1,
         )
         if "realized_pnl" in df_pos.columns:
             df_pos = df_pos.drop(columns=["realized_pnl"])
-        if "method" in df_pos.columns:
-            df_pos = df_pos.drop(columns=["method"])
         df_pos["cumulative_pnl"] = df_pos["est_pnl"]
         df_pos["holding_total_current"] = df_pos["est_value"]
         pct = pd.to_numeric(df_pos.get("est_change_pct", 0.0), errors="coerce").fillna(0.0)
@@ -367,6 +498,7 @@ def _render_live_detail(date_str: str) -> None:
                 "holding_total_current": "持仓金额",
                 "est_nav": "预估净值",
                 "est_change_pct": "预估涨跌幅(%)",
+                "method": "估值方式",
                 "confidence": "置信度",
                 "warning": "提示",
                 "est_time": "估值时间",
@@ -389,6 +521,7 @@ def _render_live_detail(date_str: str) -> None:
             "成本净值",
             "预估净值",
             "预估收益率(%)",
+            "估值方式",
             "置信度",
             "提示",
         ]
@@ -406,6 +539,8 @@ def _render_live_detail(date_str: str) -> None:
                     s = s.replace("T", " ")
                 return s[:16]
             df_pos["估值时间"] = df_pos["估值时间"].apply(_fmt_time)
+        if "估值方式" in df_pos.columns:
+            df_pos["估值方式"] = df_pos["估值方式"].apply(estimate_method_label)
         if "持仓金额" in df_pos.columns:
             df_pos = df_pos.sort_values(by="持仓金额", ascending=False, kind="stable")
 
@@ -424,7 +559,10 @@ def _render_live_detail(date_str: str) -> None:
             total_value = float(total_row.get("持仓金额", 0.0) or 0.0)
             base = total_value - total_today
             total_row["预估涨跌幅(%)"] = (total_today / base * 100.0) if abs(base) > 1e-9 else 0.0
-        df_pos = pd.concat([df_pos, pd.DataFrame([total_row])], ignore_index=True)
+        df_pos = pd.DataFrame.from_records(
+            [*df_pos.to_dict("records"), total_row],
+            columns=df_pos.columns,
+        )
 
         numeric_cols = [
             c for c in df_pos.columns
@@ -443,7 +581,7 @@ def _render_live_detail(date_str: str) -> None:
         ]:
             if c in df_pos.columns:
                 df_pos[c] = df_pos[c].round(2)
-    detail_height = 38 + max(len(df_pos), 1) * 35
+    detail_height = dataframe_height(len(df_pos), max_rows=12)
     if not df_pos.empty:
         def _color_row(row):
             try:
@@ -487,25 +625,46 @@ def _render_live_detail(date_str: str) -> None:
             height=detail_height,
             column_config=column_config or None,
         )
-    else:
-        st.dataframe(df_pos, width="stretch", hide_index=True, height=detail_height)
-
 def render_portfolio():
-    st.title("持仓 - 实时估值（按流水回放快照）")
+    page_header(
+        "持仓管理",
+        "按日期回放持仓快照，查看实时估值，并通过图片或手工校准持仓流水。",
+        eyebrow="投资组合",
+    )
     portfolio_ledger_err = get_cloud_error("portfolio_ledger")
     daily_ledger_err = get_cloud_error("daily_ledger")
     watchlist_err = get_cloud_error("watchlist")
     adjustments_err = get_cloud_error("adjustments")
     if portfolio_ledger_err:
-        st.warning(f"历史日结账本读取失败，过去日期视图可能缺少估值数据：{portfolio_ledger_err}")
+        degraded_notice(
+            "历史持仓账本暂时不可用，过去日期可能缺少估值数据。",
+            portfolio_ledger_err,
+            detail_label="历史持仓账本技术详情",
+        )
     if daily_ledger_err:
-        st.warning(f"日结数据读取失败，历史收益与误差分析可能为空：{daily_ledger_err}")
+        degraded_notice(
+            "日结数据暂时不可用，历史收益与误差分析可能为空。",
+            daily_ledger_err,
+            detail_label="日结数据技术详情",
+        )
     if watchlist_err:
-        st.warning(f"自选列表读取失败，编辑区候选基金可能不完整：{watchlist_err}")
+        degraded_notice(
+            "自选列表暂时不可用，编辑区的候选基金可能不完整。",
+            watchlist_err,
+            detail_label="自选列表技术详情",
+        )
     if adjustments_err:
-        st.warning(f"持仓流水读取失败，当前显示的是最近一次成功读取的数据：{adjustments_err}")
+        degraded_notice(
+            "持仓流水暂时不可用，当前可能显示最近一次成功读取的数据。",
+            adjustments_err,
+            detail_label="持仓流水技术详情",
+        )
 
-    d = st.date_input("as_of 日期（用于编辑/回放）", value=now_cn().date())
+    d = st.date_input(
+        "查看与编辑日期",
+        value=now_cn().date(),
+        help="历史日期展示当日快照；只有今天会使用实时估值。",
+    )
     date_str = d.isoformat()
     live_date_str = now_cn().date().isoformat()
     is_today_view = date_str == live_date_str
@@ -528,12 +687,35 @@ def render_portfolio():
         with live_summary_area:
             _render_live_summary(date_str)
 
-    st.subheader("组合口径：估算收盘 vs 官方净值")
+    live_detail_area = st.container()
+    if use_fragment_refresh:
+        @st.fragment(run_every=f"{refresh_sec}s")
+        def _live_detail_fragment() -> None:
+            with live_detail_area:
+                _render_live_detail(date_str)
 
-    ps = portfolio_gap_summary(days_back=120)
+        _live_detail_fragment()
+    else:
+        with live_detail_area:
+            _render_live_detail(date_str)
+
+    st.divider()
+    section_header(
+        "估值误差分析",
+        "比较已结算日的收盘估算与官方净值，帮助判断盘中估值的稳定性。",
+    )
+
+    threshold_p = st.slider(
+        "组合异常阈值（绝对误差%）",
+        min_value=0.10,
+        max_value=2.00,
+        value=0.30,
+        step=0.05,
+    )
+    ps = portfolio_gap_summary(days_back=120, hit_threshold_pct=threshold_p)
     latest = None
     if ps["count"] == 0:
-        st.info("暂无组合层面的 settled 对比数据。")
+        st.info("暂无已按官方净值结算的组合对比数据。")
     else:
         latest = ps["latest"]
 
@@ -541,7 +723,7 @@ def render_portfolio():
         c1.metric("样本天数", f'{ps["count"]}')
         c2.metric("平均绝对误差", f'{ps["mae_pct"]:.4f}%')
         c3.metric("最大绝对误差", f'{ps["max_abs_gap_pct"]:.4f}%')
-        c4.metric("命中率(≤0.30%)", f'{ps["hit_rate_pct"]:.1f}%')
+        c4.metric(f"命中率(≤{threshold_p:.2f}%)", f'{ps["hit_rate_pct"]:.1f}%')
 
         st.markdown(
             f"""
@@ -552,14 +734,12 @@ def render_portfolio():
     """
         )
 
-    st.subheader("组合误差历史（已结算日）")
+    st.subheader("组合误差历史")
 
 
     rows = portfolio_gap_table(days_back=120)
-    threshold_p = st.slider("组合异常阈值（绝对误差%）", min_value=0.10, max_value=2.00, value=0.30, step=0.05)
-
     if not rows:
-        st.info("暂无组合误差历史（需要 settled 数据）。")
+        st.info("暂无组合误差历史；至少需要一个已按官方净值结算的日期。")
     else:
         dfp = pd.DataFrame(rows)
         latest_row = latest if isinstance(latest, dict) else (rows[-1] if rows else None)
@@ -600,9 +780,9 @@ def render_portfolio():
             )
         )
         fig.add_hline(
-            y=0.30,
+            y=threshold_p,
             line=dict(color="gray", dash="dot"),
-            annotation_text="0.30% 阈值",
+            annotation_text=f"{threshold_p:.2f}% 阈值",
             annotation_position="top left",
         )
         fig.update_layout(
@@ -611,33 +791,43 @@ def render_portfolio():
             xaxis_title="日期",
             yaxis_title="绝对误差(%)",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         st.dataframe(
-            dfp_show[["date", "estimated_value_close", "official_value", "gap", "gap_pct", "abs_gap_pct"]],
+            dfp_show[
+                ["date", "estimated_value_close", "official_value", "gap", "gap_pct", "abs_gap_pct"]
+            ].rename(
+                columns={
+                    "date": "日期",
+                    "estimated_value_close": "收盘估算价值",
+                    "official_value": "官方口径价值",
+                    "gap": "价值误差",
+                    "gap_pct": "误差率（%）",
+                    "abs_gap_pct": "绝对误差率（%）",
+                }
+            ),
             width="stretch",
             hide_index=True,
+            height=dataframe_height(len(dfp_show), max_rows=10),
+            column_config={
+                "收盘估算价值": st.column_config.NumberColumn(format="%.2f"),
+                "官方口径价值": st.column_config.NumberColumn(format="%.2f"),
+                "价值误差": st.column_config.NumberColumn(format="%.2f"),
+                "误差率（%）": st.column_config.NumberColumn(format="%.4f"),
+                "绝对误差率（%）": st.column_config.NumberColumn(format="%.4f"),
+            },
         )
-        st.caption("说明：组合误差是按 shares_end×净值 聚合得到的近似总价值差异。")
+        st.caption("说明：组合误差按期末份额 × 净值聚合，是组合总价值差异的近似值。")
 
-
-    live_detail_area = st.container()
-    if use_fragment_refresh:
-        @st.fragment(run_every=f"{refresh_sec}s")
-        def _live_detail_fragment() -> None:
-            with live_detail_area:
-                _render_live_detail(date_str)
-
-        _live_detail_fragment()
-    else:
-        with live_detail_area:
-            _render_live_detail(date_str)
 
     st.divider()
     _render_image_import(date_str)
 
     st.divider()
-    st.subheader("编辑持仓（生成流水）")
+    section_header(
+        "编辑持仓",
+        "保存后会生成仓位校准流水，用于把账本对齐到目标持仓；这不代表一笔真实成交。",
+    )
 
     # === 关键：从快照拿默认值，避免误点保存写出脏流水 ===
     snaps = build_positions_as_of(date_str)
@@ -657,16 +847,16 @@ def render_portfolio():
             n = f"\u57fa\u91d1{c}"
         return f"{c} - {n}"
 
-    mode = st.radio("\u57fa\u91d1\u4ee3\u7801\u8f93\u5165", ["\u4ece\u81ea\u9009\u4e2d\u9009\u62e9", "\u624b\u52a8\u8f93\u5165"], horizontal=True)
-    if mode == "\u624b\u52a8\u8f93\u5165":
-        code = st.text_input("\u57fa\u91d1\u4ee3\u7801", value="", placeholder="\u4f8b\u5982\uff1a510300 / 000001").strip()
-        if not code and code_opts:
-            code = st.selectbox("\u5907\u9009\u5217\u8868", options=code_opts, format_func=_fmt_code)
+    if not code_opts:
+        mode = "手动输入代码"
+        st.caption("当前没有自选或已有持仓，请手动输入基金代码。")
+        code = st.text_input("基金代码", value="", placeholder="例如：510300 或 000001").strip()
     else:
-        if code_opts:
-            code = st.selectbox("\u81ea\u9009/\u5df2\u6709\u4ee3\u7801", options=code_opts, format_func=_fmt_code)
+        mode = st.radio("基金来源", ["从自选或现有持仓选择", "手动输入代码"], horizontal=True)
+        if mode == "手动输入代码":
+            code = st.text_input("基金代码", value="", placeholder="例如：510300 或 000001").strip()
         else:
-            code = st.text_input("\u57fa\u91d1\u4ee3\u7801", value="", placeholder="\u4f8b\u5982\uff1a510300 / 000001").strip()
+            code = st.selectbox("自选或已有持仓", options=code_opts, format_func=_fmt_code)
 
     if not code:
         st.info("\u8bf7\u5148\u8f93\u5165\u57fa\u91d1\u4ee3\u7801\u6216\u5728\u81ea\u9009\u4e2d\u6dfb\u52a0\u57fa\u91d1\u3002")
@@ -676,16 +866,18 @@ def render_portfolio():
     cur_shares = float(cur.shares_end) if cur else 0.0
     cur_cost = float(cur.avg_cost_nav_end) if cur else 0.0
     cur_realized = float(cur.realized_pnl_end) if cur else 0.0
-    default_record_amount = float(cur_shares * cur_cost)
-    yday_date_str = (date.fromisoformat(date_str) - timedelta(days=1)).isoformat()
-    yday_total_pnl_default = get_fund_cumulative_pnl_on(code, yday_date_str)
+    yday_total_pnl_default = get_latest_fund_cumulative_pnl_before(code, date_str)
     if yday_total_pnl_default is None:
         yday_total_pnl_default = 0.0
 
-    input_mode = st.radio("编辑方式", ["按金额/收益输入", "按份额/净值输入"], horizontal=True)
+    is_today_edit = date_str == now_cn().date().isoformat()
+    if is_today_edit:
+        input_mode_options = ["按金额/收益输入", "按份额/净值输入"]
+    else:
+        input_mode_options = ["按份额/净值输入"]
+        st.info("历史日期不使用今天行情换算金额；请按当日实际份额和成本净值录入。")
+    input_mode = st.radio("编辑方式", input_mode_options, horizontal=True)
 
-    amount_end_input = None
-    record_amount_input = default_record_amount
     if input_mode == "按金额/收益输入":
         try:
             est = estimate_one(code)
@@ -718,8 +910,6 @@ def render_portfolio():
         realized = cur_realized
 
         shares_end = (amount_end / nav_for_calc) if nav_for_calc > 0 else 0.0
-        amount_end_input = float(amount_end)
-        record_amount_input = float(amount_end)
         cost_value = amount_end + realized - total_pnl_end
         avg_cost = (cost_value / shares_end) if shares_end > 0 else 0.0
 
@@ -727,19 +917,22 @@ def render_portfolio():
             f"今日预估涨跌幅: {pct_for_calc:.2f}%；今日预估收益: {today_est_pnl:.2f} 元；"
             f"当日结束累计收益(自动): {total_pnl_end:.2f} 元；已实现收益沿用: {realized:.2f} 元"
         )
-        st.caption(f"当前估值净值(用于换算): {nav_for_calc:.6f}；自动换算份额: {shares_end:.4f}；自动换算成本净值: {avg_cost:.6f}")
+        st.caption(
+            f"当前估值净值（用于换算）：{nav_for_calc:.6f}；"
+            f"自动换算份额：{shares_end:.4f}；自动换算成本净值：{avg_cost:.6f}"
+        )
     else:
         colA, colB, colC = st.columns(3)
         with colA:
             shares_end = st.number_input(
-                "当日结束份额 shares_end",
+                "当日结束份额",
                 min_value=0.0,
                 value=cur_shares,
                 step=10.0
             )
         with colB:
             avg_cost = st.number_input(
-                "当日结束成本净值 avg_cost_nav_end",
+                "当日结束成本净值",
                 min_value=0.0,
                 value=cur_cost,
                 step=0.01,
@@ -747,21 +940,12 @@ def render_portfolio():
             )
         with colC:
             realized = st.number_input(
-                "当日结束已实现收益 realized_pnl_end",
+                "当日结束已实现收益（元）",
                 value=cur_realized,
                 step=1.0,
                 format="%.4f"
             )
-        record_amount_input = st.number_input(
-            "录入持仓金额(展示口径)",
-            min_value=0.0,
-            value=float(default_record_amount),
-            step=100.0,
-            format="%.2f",
-        )
-
     note = "UI编辑"
-    st.caption("说明：此处生成的是“仓位校准流水”，用于把账本对齐到目标持仓，不代表真实成交价。")
 
     is_clearing = cur_shares > 0 and float(shares_end) == 0.0
     clear_confirmed = True
@@ -773,7 +957,12 @@ def render_portfolio():
             key=f"confirm_clear_{date_str}_{code}",
         )
 
-    if st.button("保存编辑（写入流水）", type="primary", disabled=(is_clearing and not clear_confirmed)):
+    if st.button(
+        "保存持仓校准",
+        type="primary",
+        disabled=(is_clearing and not clear_confirmed),
+        width="stretch",
+    ):
         try:
             apply_position_edit(
                 effective_date=date_str,
@@ -787,20 +976,31 @@ def render_portfolio():
             _clear_portfolio_view_cache()
             st.rerun()
         except Exception as e:
-            st.error(f"保存失败：{e}")
+            action_error("保存失败，现有持仓数据未确认变更。", e)
 
     st.divider()
-    st.subheader("删除持仓（危险操作）")
-    st.caption("删除该基金全部历史流水记录，并清理录入持仓金额。")
-    confirm_delete = st.checkbox("我确认删除该基金全部持仓流水", value=False, key=f"confirm_delete_{code}")
-    if st.button("删除该基金全部流水", type="secondary", disabled=not confirm_delete):
-        try:
-            removed = _remove_adjustments_by_code_safe(code)
-            st.success(f"已删除 {code} 的 {removed} 条流水记录。")
-            _clear_portfolio_view_cache()
-            st.rerun()
-        except Exception as e:
-            st.error(f"删除失败：{e}")
+    with st.expander("删除持仓数据（高风险）", expanded=False):
+        with danger_container("delete_position_history"):
+            st.markdown("**永久删除所选基金的全部历史持仓流水**")
+            st.caption("删除后无法在应用内恢复；自选和日结记录不会随之删除。")
+            confirm_delete = st.checkbox(
+                f"我确认永久删除 {code} 的全部持仓流水",
+                value=False,
+                key=f"confirm_delete_{code}",
+            )
+            if st.button(
+                "永久删除全部持仓流水",
+                type="primary",
+                disabled=not confirm_delete,
+                width="stretch",
+            ):
+                try:
+                    removed = _remove_adjustments_by_code_safe(code)
+                    st.success(f"已删除 {code} 的 {removed} 条流水记录。")
+                    _clear_portfolio_view_cache()
+                    st.rerun()
+                except Exception as e:
+                    action_error("删除失败，请稍后重试。", e)
 
 
 render_portfolio()

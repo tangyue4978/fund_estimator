@@ -4,6 +4,7 @@ import json
 import re
 from datetime import datetime
 from typing import List
+from zoneinfo import ZoneInfo
 
 from datasources.http_client import get_text
 
@@ -50,7 +51,7 @@ def get_official_nav_history(code: str) -> List[dict]:
         if x is None or y is None:
             continue
         try:
-            d = datetime.fromtimestamp(int(x) / 1000).date().isoformat()
+            d = datetime.fromtimestamp(int(x) / 1000, tz=ZoneInfo("Asia/Shanghai")).date().isoformat()
             nav = float(y)
         except Exception:
             continue
@@ -59,4 +60,3 @@ def get_official_nav_history(code: str) -> List[dict]:
 
     out.sort(key=lambda z: str(z.get("date", "")))
     return out
-

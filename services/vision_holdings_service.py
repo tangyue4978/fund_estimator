@@ -9,6 +9,10 @@ from typing import Any, Dict, List
 import requests
 
 
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+SUPPORTED_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
+
+
 def _load_secret(key: str) -> str:
     value = os.getenv(key, "").strip()
     if value:
@@ -109,6 +113,15 @@ def analyze_holdings_image(
     filename: str,
     mode: str,
 ) -> Dict[str, Any]:
+    if not image_bytes:
+        raise ValueError("图片内容为空")
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise ValueError("单张图片不能超过 10 MB")
+    if str(mime_type or "").lower() not in SUPPORTED_IMAGE_MIME_TYPES:
+        raise ValueError("仅支持 PNG、JPEG 或 WEBP 图片")
+    if mode not in {"sync", "delta"}:
+        raise ValueError("不支持的图片导入模式")
+
     cfg = vision_config()
     if not cfg["api_key"]:
         raise RuntimeError("未配置 Gemini API Key")

@@ -30,8 +30,7 @@ def build_positions_as_of_safe(target_date: str) -> SnapshotResult:
     回放到 target_date（含当日）的持仓快照（容错版本）：
     - SELL 超过持仓：截断到当前持仓，不抛异常；写 warning
     """
-    adjs = list_adjustments()
-    adjs = [a for a in adjs if str(a.get("effective_date")) <= target_date]
+    adjs = list_adjustments(through_date=target_date)
 
     shares: Dict[str, float] = {}
     avg_cost: Dict[str, float] = {}

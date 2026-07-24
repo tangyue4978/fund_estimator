@@ -6,6 +6,7 @@ from typing import List, Optional
 from datasources.gsz_provider import get_gsz_quote
 from datasources.nav_history_provider import get_official_nav_history
 from services.trading_time import is_cn_trading_time, now_cn
+from services.intraday_service import intraday_load_fund_series
 from config import constants
 from storage.ledger_repo import get_daily_ledger_items
 
@@ -88,22 +89,34 @@ def _datetime_from_iso_like(raw: str) -> Optional[datetime]:
 
 
 def _load_realtime_series(code: str) -> List[dict]:
-    # Realtime mode only shows today's estimate point.
+    today_str = now_cn().date().isoformat()
+    out: List[dict] = []
+    for item in intraday_load_fund_series(code, limit=720, date_str=today_str):
+        value = _safe_float(item.get("est_nav"), None)
+        if value is None or value <= 0:
+            continue
+        timestamp = str(item.get("date") or "").strip()
+        if not timestamp:
+            point_time = str(item.get("t") or "").strip()
+            timestamp = f"{today_str} {point_time}" if point_time else ""
+        if _datetime_from_iso_like(timestamp) is None:
+            continue
+        out.append({"date": timestamp, "value": value})
+
+    # Add the latest provider point even before the first persisted refresh.
     q = get_gsz_quote(code)
     gsz_val = _safe_float(getattr(q, "gsz", None) if q else None, None)
-    if gsz_val is None or gsz_val <= 0:
-        return []
+    if gsz_val is not None and gsz_val > 0:
+        quote_date = _date_from_iso_like(getattr(q, "gztime", "") if q else "")
+        use_today_est = bool(quote_date == today_str) or is_cn_trading_time(now_cn())
+        if use_today_est:
+            qdt = _datetime_from_iso_like(getattr(q, "gztime", "") if q else "")
+            if qdt is None:
+                qdt = now_cn().replace(tzinfo=None)
+            out.append({"date": qdt.strftime("%Y-%m-%d %H:%M:%S"), "value": gsz_val})
 
-    today_str = now_cn().date().isoformat()
-    quote_date = _date_from_iso_like(getattr(q, "gztime", "") if q else "")
-    use_today_est = bool(quote_date == today_str) or is_cn_trading_time(now_cn())
-    if not use_today_est:
-        return []
-
-    qdt = _datetime_from_iso_like(getattr(q, "gztime", "") if q else "")
-    if qdt is None:
-        qdt = now_cn().replace(tzinfo=None)
-    return [{"date": qdt.strftime("%Y-%m-%d %H:%M:%S"), "value": gsz_val}]
+    deduped = {str(item["date"]): item for item in out}
+    return sorted(deduped.values(), key=lambda item: str(item["date"]))
 
 
 def _load_profit_series(code: str) -> List[dict]:

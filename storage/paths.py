@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import sys
 from pathlib import Path
 
@@ -92,14 +91,10 @@ def user_data_dir(user_id: str | None = None) -> Path:
 
 
 def _user_file_with_legacy_seed(filename: str) -> Path:
-    user_path = user_data_dir() / filename
-    legacy_path = data_dir() / filename
-    if (not user_path.exists()) and legacy_path.exists():
-        try:
-            shutil.copy2(legacy_path, user_path)
-        except Exception:
-            pass
-    return user_path
+    # Legacy root files may contain another account's private portfolio data.
+    # Automatic per-user copying is therefore unsafe; migrations must be an
+    # explicit, owner-scoped operation.
+    return user_data_dir() / filename
 
 
 def _safe_filename(key: str) -> str:

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import math
+import re
 import uuid
-from datetime import datetime
+import time
+from datetime import date, datetime, timezone
 from typing import List, Optional
 
 from services import supabase_client
@@ -10,7 +13,7 @@ from storage import paths
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _looks_like_ui_edit(item: dict) -> bool:
@@ -29,28 +32,56 @@ def _looks_like_ui_edit(item: dict) -> bool:
     )
 
 
-def _cache_key(code: Optional[str] = None) -> str:
+def _cache_key(code: Optional[str] = None, through_date: Optional[str] = None) -> str:
     suffix = (code or "__all__").strip() or "__all__"
+    if through_date:
+        suffix = f"{suffix}__through_{through_date}"
     return f"_adjustments_cache_{paths.current_user_id()}_{suffix}"
 
 
-def _read_cached_adjustments(code: Optional[str] = None) -> List[dict]:
+def _read_cached_adjustments(code: Optional[str] = None, through_date: Optional[str] = None) -> List[dict]:
     try:
         import streamlit as st  # type: ignore
 
-        cached = st.session_state.get(_cache_key(code), [])
+        cached = st.session_state.get(_cache_key(code, through_date), [])
         return [x for x in cached if isinstance(x, dict)] if isinstance(cached, list) else []
     except Exception:
         return []
 
 
-def _write_cached_adjustments(code: Optional[str], rows: List[dict]) -> None:
+def _read_fresh_cached_adjustments(
+    code: Optional[str] = None,
+    through_date: Optional[str] = None,
+    *,
+    max_age_sec: float = 2.0,
+) -> Optional[List[dict]]:
     try:
         import streamlit as st  # type: ignore
 
-        st.session_state[_cache_key(code)] = [x for x in rows if isinstance(x, dict)]
+        key = _cache_key(code, through_date)
+        ts = float(st.session_state.get(f"{key}__ts", 0.0) or 0.0)
+        if ts <= 0 or (time.monotonic() - ts) > max_age_sec:
+            return None
+        return _read_cached_adjustments(code, through_date)
+    except Exception:
+        return None
+
+
+def _write_cached_adjustments(
+    code: Optional[str],
+    rows: List[dict],
+    through_date: Optional[str] = None,
+) -> None:
+    try:
+        import streamlit as st  # type: ignore
+
+        key = _cache_key(code, through_date)
+        st.session_state[key] = [x for x in rows if isinstance(x, dict)]
+        st.session_state[f"{key}__ts"] = time.monotonic()
         if code:
-            st.session_state.pop(_cache_key(None), None)
+            all_key = _cache_key(None)
+            st.session_state.pop(all_key, None)
+            st.session_state.pop(f"{all_key}__ts", None)
     except Exception:
         pass
 
@@ -75,7 +106,7 @@ def migrate_ui_edit_source(code: Optional[str] = None, effective_date: Optional[
     try:
         params = {
             "user_id": f"eq.{paths.current_user_id()}",
-            "order": "effective_date.asc,created_at.asc",
+            "order": "effective_date.asc,created_at.asc,id.asc",
             "select": "id,note,source",
         }
         if code:
@@ -105,30 +136,44 @@ def migrate_ui_edit_source(code: Optional[str] = None, effective_date: Optional[
         return 0
 
 
-def list_adjustments(code: Optional[str] = None) -> List[dict]:
+def list_adjustments(
+    code: Optional[str] = None,
+    *,
+    through_date: Optional[str] = None,
+) -> List[dict]:
     if not supabase_client.is_enabled():
         return []
+    code = (code or "").strip() or None
+    through_date = (through_date or "").strip() or None
+    cached = _read_fresh_cached_adjustments(code, through_date)
+    if cached is not None:
+        return cached
     try:
-        params_base = {"user_id": f"eq.{paths.current_user_id()}", "order": "effective_date.asc,created_at.asc"}
+        params_base = {
+            "user_id": f"eq.{paths.current_user_id()}",
+            "order": "effective_date.asc,created_at.asc,id.asc",
+        }
         if code:
-            params_base["code"] = f"eq.{code.strip()}"
+            params_base["code"] = f"eq.{code}"
+        if through_date:
+            params_base["effective_date"] = f"lte.{through_date}"
         try:
-            rows = supabase_client.get_rows(
+            rows = supabase_client.get_rows_paginated(
                 "app_adjustments",
                 params={**params_base, "select": "id,type,code,effective_date,shares,price,cash,note,source,created_at"},
             )
         except Exception:
-            rows = supabase_client.get_rows(
+            rows = supabase_client.get_rows_paginated(
                 "app_adjustments",
                 params={**params_base, "select": "id,type,code,effective_date,shares,price,cash,note,created_at"},
             )
         out = [x for x in rows if isinstance(x, dict)]
-        _write_cached_adjustments(code, out)
+        _write_cached_adjustments(code, out, through_date)
         clear_cloud_error("adjustments")
         return out
     except Exception as e:
         set_cloud_error("adjustments", e)
-        return _read_cached_adjustments(code)
+        return _read_cached_adjustments(code, through_date)
 
 
 def add_adjustment(
@@ -147,10 +192,29 @@ def add_adjustment(
     effective_date = (effective_date or "").strip()
     if type not in ("BUY", "SELL", "CASH_ADJ"):
         raise ValueError("type must be BUY/SELL/CASH_ADJ")
-    if not code:
-        raise ValueError("code is required")
-    if not effective_date:
-        raise ValueError("effective_date is required")
+    if not re.fullmatch(r"\d{6}", code):
+        raise ValueError("code must be 6 digits")
+    try:
+        date.fromisoformat(effective_date)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("effective_date must be an ISO date") from exc
+    try:
+        shares = float(shares)
+        price = float(price)
+        cash = float(cash)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("adjustment values must be numeric") from exc
+    if not all(math.isfinite(value) for value in (shares, price, cash)):
+        raise ValueError("adjustment values must be finite")
+    if shares < 0 or shares > 1e15:
+        raise ValueError("shares is outside the supported range")
+    if price < 0 or price > 1e12:
+        raise ValueError("price is outside the supported range")
+    if abs(cash) > 1e18:
+        raise ValueError("cash is outside the supported range")
+    note = str(note) if note is not None else None
+    if note is not None and len(note) > 500:
+        raise ValueError("note is too long")
     source = (source or "manual").strip().lower()
     if source not in ("manual", "ui_edit"):
         raise ValueError("source must be manual/ui_edit")
@@ -192,6 +256,50 @@ def add_adjustment(
         return {"items": list_adjustments(), "updated_at": _now_iso()}
     except Exception as e:
         raise RuntimeError(f"add_adjustment cloud failed: {e}") from e
+
+
+def replace_ui_position_edit_atomic(
+    *,
+    effective_date: str,
+    code: str,
+    shares_end: float,
+    avg_cost_nav_end: float,
+    realized_pnl_end: float,
+    note: Optional[str] = None,
+) -> bool:
+    """Use the database transaction RPC when the security migration is installed.
+
+    Returns False only when the RPC is not present, allowing an explicitly
+    documented compatibility fallback. Other failures are not downgraded to
+    the legacy multi-request write path because the transaction outcome may be
+    unknown after a timeout.
+    """
+    if not supabase_client.is_enabled():
+        raise RuntimeError("cloud storage is not configured")
+
+    resp = supabase_client.call_rpc(
+        "app_apply_position_edit",
+        {
+            "p_user_id": paths.current_user_id(),
+            "p_effective_date": effective_date,
+            "p_code": code,
+            "p_shares_end": float(shares_end),
+            "p_avg_cost_nav_end": float(avg_cost_nav_end),
+            "p_realized_pnl_end": float(realized_pnl_end),
+            "p_note": note,
+        },
+    )
+    if resp.status_code in (200, 201, 204):
+        _clear_adjustments_cache()
+        return True
+    if resp.status_code == 404:
+        try:
+            error_code = str((resp.json() or {}).get("code", "")).strip().upper()
+        except Exception:
+            error_code = ""
+        if error_code == "PGRST202":
+            return False
+    raise RuntimeError("atomic position edit failed; retry only after checking cloud state")
 
 
 def remove_adjustment(adj_id: str) -> dict:

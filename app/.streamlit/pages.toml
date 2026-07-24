@@ -1,19 +1,29 @@
 ﻿[[pages]]
 path = "Home.py"
-name = "自选基金"
+name = "自选与估值"
 icon = ":material/home:"
 
 [[pages]]
 path = "pages/01_持仓.py"
-name = "持仓"
+name = "持仓管理"
 icon = ":material/account_balance_wallet:"
 
 [[pages]]
 path = "pages/02_日结.py"
-name = "日结"
+name = "日结台账"
 icon = ":material/receipt_long:"
 
 [[pages]]
 path = "pages/03_基金详情.py"
 name = "基金详情"
 icon = ":material/finance:"
+
+[[pages]]
+path = "pages/04_组合分析.py"
+name = "组合分析"
+icon = ":material/analytics:"
+
+[[pages]]
+path = "pages/05_系统状态.py"
+name = "系统状态"
+icon = ":material/health_and_safety:"

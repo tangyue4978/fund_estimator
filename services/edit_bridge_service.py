@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import math
+import re
 from datetime import date
 from typing import Optional, Dict
 
 from services.snapshot_service import build_positions_as_of
-from services.adjustment_service import add_adjustment, remove_adjustments_by_code_date, list_adjustments
+from services.adjustment_service import (
+    add_adjustment,
+    list_adjustments,
+    remove_adjustments_by_code_date,
+    replace_ui_position_edit_atomic,
+)
 
 
 def _get_snapshot_map(d: str) -> Dict[str, dict]:
@@ -98,15 +105,36 @@ def apply_position_edit(
     - realized delta is aligned by CASH_ADJ
     """
     code = (code or "").strip()
-    if not code:
-        raise ValueError("code is required")
+    if not re.fullmatch(r"\d{6}", code):
+        raise ValueError("code must be 6 digits")
 
-    if shares_end < 0:
-        raise ValueError("shares_end must be >= 0")
-    if avg_cost_nav_end < 0:
-        raise ValueError("avg_cost_nav_end must be >= 0")
+    shares_end = float(shares_end)
+    avg_cost_nav_end = float(avg_cost_nav_end)
+    realized_pnl_end = float(realized_pnl_end)
+    if not all(math.isfinite(value) for value in (shares_end, avg_cost_nav_end, realized_pnl_end)):
+        raise ValueError("position values must be finite")
+    if shares_end < 0 or shares_end > 1e15:
+        raise ValueError("shares_end is outside the supported range")
+    if avg_cost_nav_end < 0 or avg_cost_nav_end > 1e12:
+        raise ValueError("avg_cost_nav_end is outside the supported range")
+    if shares_end > 0 and avg_cost_nav_end <= 0:
+        raise ValueError("avg_cost_nav_end must be > 0 when shares_end > 0")
+    if abs(realized_pnl_end) > 1e18:
+        raise ValueError("realized_pnl_end is outside the supported range")
+    if note is not None and len(str(note)) > 500:
+        raise ValueError("note is too long")
 
     _ = date.fromisoformat(effective_date)  # validate date format
+
+    if replace_ui_position_edit_atomic(
+        effective_date=effective_date,
+        code=code,
+        shares_end=float(shares_end),
+        avg_cost_nav_end=float(avg_cost_nav_end),
+        realized_pnl_end=float(realized_pnl_end),
+        note=note,
+    ):
+        return
 
     # Keep old UI-edit rows for rollback if write fails midway.
     old_ui_items = [

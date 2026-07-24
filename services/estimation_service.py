@@ -41,7 +41,7 @@ def _cross_check_holdings_vs_gsz(est: EstimateResult, q) -> EstimateResult:
         return est
     if est.method != constants.METHOD_HOLDING_WEIGHTED:
         return est
-    if not q:
+    if not q or bool(getattr(q, "stale", False)):
         return est
 
     try:
@@ -70,7 +70,8 @@ def _cross_check_holdings_vs_gsz(est: EstimateResult, q) -> EstimateResult:
 
 
 def _estimate_from_gsz(code: str, name: str, q, *, method: str) -> EstimateResult:
-    if q and q.gsz and q.gsz > 0:
+    quote_is_fresh = bool(q) and not bool(getattr(q, "stale", False))
+    if quote_is_fresh and q.gsz and q.gsz > 0:
         return EstimateResult(
             code=code,
             name=name,
@@ -83,28 +84,33 @@ def _estimate_from_gsz(code: str, name: str, q, *, method: str) -> EstimateResul
             est_time=q.gztime,
         )
 
-    if not q:
+    frozen_nav = q.nav if quote_is_fresh and q.nav and q.nav > 0 else 0.0
+    nav_date = None
+    if frozen_nav <= 0:
+        frozen_nav, nav_date = _latest_official_nav(code)
+
+    if frozen_nav > 0:
+        nav_label = nav_date or "最近交易日"
         return EstimateResult(
             code=code,
             name=name,
-            est_nav=0.0,
+            est_nav=frozen_nav,
             est_change_pct=0.0,
             method=constants.METHOD_FROZEN_NAV,
-            confidence=0.0,
-            warning="estimate data unavailable",
+            confidence=0.5,
+            warning=f"实时估值不可用，已使用 {nav_label} 官方净值",
             suggested_refresh_sec=60,
-            est_time=now_iso(),
+            est_time=nav_date or (q.gztime if q else now_iso()),
         )
 
-    frozen_nav = q.nav if q and q.nav and q.nav > 0 else 0.0
     return EstimateResult(
         code=code,
         name=name,
-        est_nav=frozen_nav,
+        est_nav=0.0,
         est_change_pct=0.0,
         method=constants.METHOD_FROZEN_NAV,
-        confidence=0.3,
-        warning="estimate data unavailable, fallback to last nav",
+        confidence=0.0,
+        warning="实时估值和官方净值均不可用",
         suggested_refresh_sec=60,
         est_time=q.gztime if q else now_iso(),
     )
@@ -122,7 +128,10 @@ def _estimate_by_holdings(code: str, name: str, holdings_obj: dict, stock_quotes
     for it in holdings:
         if not isinstance(it, dict):
             continue
-        w = float(it.get("weight_pct") or it.get("weight") or 0.0)
+        try:
+            w = float(it.get("weight_pct") or it.get("weight") or 0.0)
+        except (TypeError, ValueError):
+            continue
         if w <= 0:
             continue
         total_weight += w
@@ -138,10 +147,14 @@ def _estimate_by_holdings(code: str, name: str, holdings_obj: dict, stock_quotes
     if total_weight <= 0 or covered_weight <= 0:
         return None
 
-    weighted_pct = weighted_sum / total_weight
-    coverage = covered_weight / total_weight * 100.0
+    # 基金披露的通常只是前十大持仓，未披露部分应按“涨跌 0”处理，不能把
+    # 已覆盖持仓重新归一化到 100%，否则会显著放大盘中涨跌。
+    normalization = 100.0 / total_weight if total_weight > 100.0 else 1.0
+    weighted_pct = weighted_sum * normalization / 100.0
+    coverage = min(100.0, covered_weight * normalization)
 
-    base_nav = q.nav if q and q.nav and q.nav > 0 else 0.0
+    quote_is_fresh = bool(q) and not bool(getattr(q, "stale", False))
+    base_nav = q.nav if quote_is_fresh and q.nav and q.nav > 0 else 0.0
     if base_nav <= 0:
         base_nav, _ = _latest_official_nav(code)
     if base_nav <= 0:
@@ -155,12 +168,14 @@ def _estimate_by_holdings(code: str, name: str, holdings_obj: dict, stock_quotes
     else:
         confidence = 0.35
 
-    warning = ""
+    warnings: list[str] = []
     if coverage < 60:
-        warning = f"holdings coverage low ({coverage:.1f}%)"
+        warnings.append(f"持仓覆盖率较低（{coverage:.1f}%）")
+    if total_weight > 100.0:
+        warnings.append(f"披露持仓权重合计异常（{total_weight:.1f}%），已归一化")
     as_of = str(holdings_obj.get("as_of") or "").strip()
     if as_of:
-        warning = f"{warning}; holdings as_of {as_of}" if warning else f"holdings as_of {as_of}"
+        warnings.append(f"持仓截止 {as_of}")
 
     return EstimateResult(
         code=code,
@@ -169,7 +184,7 @@ def _estimate_by_holdings(code: str, name: str, holdings_obj: dict, stock_quotes
         est_change_pct=weighted_pct,
         method=constants.METHOD_HOLDING_WEIGHTED,
         confidence=confidence,
-        warning=warning,
+        warning="；".join(warnings),
         suggested_refresh_sec=10,
         est_time=now_iso(),
         realtime_coverage_value_pct=coverage,

@@ -230,42 +230,56 @@ def portfolio_realtime_view_as_of(date_str: Optional[str] = None) -> dict:
 
         if use_live_estimate:
             est = est_map.get(s.code)
-            est_nav = est.est_nav if est else 0.0
+            source_est_nav = float(est.est_nav or 0.0) if est else 0.0
+            has_valuation = source_est_nav > 0
+            est_nav = source_est_nav if has_valuation else (cost_nav if cost_nav > 0 else 0.0)
             value = shares * est_nav
             pnl = value - cost + realized
             est_change_pct = est.est_change_pct if est else 0.0
-            method = est.method if est else ""
+            method = est.method if est else constants.METHOD_FROZEN_NAV
             confidence = est.confidence if est else 0.0
             warning = est.warning if est else "无估值数据"
+            if not has_valuation and est_nav > 0:
+                fallback_warning = "估值数据缺失，暂按成本净值显示（不代表实时净值）"
+                warning = f"{warning}；{fallback_warning}" if warning else fallback_warning
+                method = constants.METHOD_FROZEN_NAV
+                confidence = 0.0
             est_time = est.est_time if est else ""
+            is_covered = has_valuation and method != constants.METHOD_FROZEN_NAV
         else:
             row = ledger_map.get(s.code, {})
             status = str(row.get("settle_status", "")).strip()
-            if status == constants.SETTLE_SETTLED and row.get("official_nav") is not None:
-                est_nav = float(row.get("official_nav") or 0.0)
+            official_nav = float(row.get("official_nav") or 0.0)
+            estimated_nav = float(row.get("estimated_nav_close") or 0.0)
+            if status == constants.SETTLE_SETTLED and official_nav > 0:
+                est_nav = official_nav
                 pnl = float(row.get("official_pnl") or 0.0)
                 method = "OFFICIAL_CLOSE"
                 confidence = 1.0
-            elif row.get("estimated_nav_close") is not None:
-                est_nav = float(row.get("estimated_nav_close") or 0.0)
+                has_valuation = True
+            elif estimated_nav > 0:
+                est_nav = estimated_nav
                 pnl = float(row.get("estimated_pnl_close") or (shares * est_nav - cost + realized))
                 method = "ESTIMATED_CLOSE"
                 confidence = 0.6
+                has_valuation = True
             else:
-                est_nav = 0.0
-                pnl = value = 0.0
-                method = ""
+                est_nav = cost_nav if cost_nav > 0 else 0.0
+                pnl = shares * est_nav - cost + realized
+                method = constants.METHOD_FROZEN_NAV
                 confidence = 0.0
+                has_valuation = False
+            is_covered = has_valuation
             value = shares * est_nav
             est_change_pct = 0.0
-            warning = "" if est_nav > 0 else f"{d} 无日结估值数据"
+            warning = "" if has_valuation else f"{d} 无日结估值数据，暂按成本净值显示"
             est_time = d
 
         total_cost += cost
         total_value += value
         total_pnl += pnl
 
-        if est_nav > 0:
+        if is_covered:
             covered_value += value
 
         rows.append(

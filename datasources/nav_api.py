@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 from config import settings
 from datasources.http_client import get_text
@@ -55,7 +56,7 @@ def _parse_networth_trend(code: str, js_text: str) -> List[OfficialNav]:
         if x is None or y is None:
             continue
         try:
-            dt = datetime.fromtimestamp(int(x) / 1000)
+            dt = datetime.fromtimestamp(int(x) / 1000, tz=ZoneInfo("Asia/Shanghai"))
             d = dt.date().isoformat()
             nav = float(y)
             if nav > 0:

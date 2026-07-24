@@ -1,6 +1,6 @@
 # Fund Estimator Web
 
-基金组合实时估值与日结分析系统。当前分支保留在线 Web 应用，入口为 Streamlit 页面 `app/Home.py`。
+基金组合实时估值与日结分析系统。主入口为 `app/Home.py`，根目录 `main.py` 提供兼容入口。
 
 ## 功能概览
 
@@ -28,7 +28,16 @@
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m streamlit run app/Home.py
+.\.venv\Scripts\python.exe -m streamlit run main.py
+```
+
+本地验收：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe scripts\preflight.py
+.\.venv\Scripts\python.exe scripts\preflight.py --require-cloud
 ```
 
 ## 部署到 Streamlit Community Cloud
@@ -36,11 +45,19 @@
 1. 推送代码到 GitHub。
 2. 在 Streamlit Community Cloud 创建新应用。
 3. Main file path 设置为 `app/Home.py`。
-4. 在 Streamlit secrets 配置 `SUPABASE_URL` 和 `SUPABASE_KEY`。
+4. 在 Streamlit secrets 配置 `SUPABASE_URL`、`SUPABASE_KEY` 和独立的
+   `AUTH_COOKIE_SECRET`。后者应使用至少 32 字节的随机值，不能复用 Supabase Key。
 5. 如需启用图片识别，额外配置 `GEMINI_API_KEY`，可选配置 `GEMINI_MODEL` 和 `GEMINI_API_BASE_URL`。
+6. 应用数据库加固迁移前，先备份并按
+   `docs/SECURITY_DEPLOYMENT.md` 执行预检；不要由应用自动执行迁移。
 
 ## 运行依赖
 
 - Supabase 用于登录、自选同步、持仓流水和日结数据。
 - 行情与净值接口由 `datasources/` 下的适配器封装。
-- 浏览器刷新后，登录状态通过签名 Cookie 保持，session id 不再放入 URL。
+- 配置 `AUTH_COOKIE_SECRET` 后，浏览器刷新可通过签名 Cookie 保持登录；未配置时仅使用本机
+  session 文件，不适合多实例部署。
+- 当前自建用户表方案仍属于过渡实现。正式公网部署建议迁移到 Supabase Auth，并为所有业务表
+  启用基于 `auth.uid()` 的 RLS；服务端 Secret 不应承担普通用户请求。
+- 实时估值源不可用时，页面会明确降级到最近官方净值；降级值不计入实时覆盖，也不会写入实时收盘日结。
+- 基金详情会按登录用户保存有上限、去重后的当日盘中采样；云端临时文件系统重启后可能丢失，正式多实例部署应接入共享时序存储。

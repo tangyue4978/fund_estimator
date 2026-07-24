@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+from threading import Lock
+from time import monotonic
 from typing import Any, Dict, List, Optional
 
 from services import supabase_client
 from services.trading_time import now_cn
 from storage import paths
+
+
+_LEDGER_QUERY_CACHE_TTL_SEC = 5.0
+_LEDGER_QUERY_CACHE_MAX_ENTRIES = 64
+_ledger_query_cache: Dict[tuple, tuple[float, List[dict]]] = {}
+_ledger_query_cache_lock = Lock()
 
 
 @dataclass
@@ -28,19 +36,74 @@ def _safe_float(x: Any) -> Optional[float]:
         return None
 
 
-def _read_daily_ledger_items() -> List[dict]:
+def clear_ledger_query_cache(user_id: Optional[str] = None) -> None:
+    """Invalidate the short-lived read cache after ledger writes."""
+    with _ledger_query_cache_lock:
+        if user_id is None:
+            _ledger_query_cache.clear()
+            return
+        uid = str(user_id)
+        stale_keys = [key for key in _ledger_query_cache if key and key[0] == uid]
+        for key in stale_keys:
+            _ledger_query_cache.pop(key, None)
+
+
+def _get_cached_rows(key: tuple) -> Optional[List[dict]]:
+    now = monotonic()
+    with _ledger_query_cache_lock:
+        cached = _ledger_query_cache.get(key)
+        if cached is None:
+            return None
+        cached_at, rows = cached
+        if now - cached_at > _LEDGER_QUERY_CACHE_TTL_SEC:
+            _ledger_query_cache.pop(key, None)
+            return None
+        return list(rows)
+
+
+def _cache_rows(key: tuple, rows: List[dict]) -> None:
+    now = monotonic()
+    with _ledger_query_cache_lock:
+        expired = [
+            cache_key
+            for cache_key, (cached_at, _) in _ledger_query_cache.items()
+            if now - cached_at > _LEDGER_QUERY_CACHE_TTL_SEC
+        ]
+        for cache_key in expired:
+            _ledger_query_cache.pop(cache_key, None)
+        if len(_ledger_query_cache) >= _LEDGER_QUERY_CACHE_MAX_ENTRIES:
+            oldest = min(_ledger_query_cache, key=lambda cache_key: _ledger_query_cache[cache_key][0])
+            _ledger_query_cache.pop(oldest, None)
+        _ledger_query_cache[key] = (now, list(rows))
+
+
+def _read_daily_ledger_items(*, start_date: str = "", code: str = "") -> List[dict]:
     if not supabase_client.is_enabled():
         return []
     try:
-        rows = supabase_client.get_rows(
+        uid = paths.current_user_id()
+        params = {
+            "user_id": f"eq.{uid}",
+            "select": "date,code,shares_end,estimated_nav_close,official_nav,settle_status",
+            "order": "date.asc,code.asc",
+        }
+        if start_date:
+            params["date"] = f"gte.{start_date}"
+        if code:
+            params["code"] = f"eq.{code}"
+
+        cache_key = (str(uid), tuple(sorted(params.items())))
+        cached = _get_cached_rows(cache_key)
+        if cached is not None:
+            return cached
+
+        rows = supabase_client.get_rows_paginated(
             "app_daily_ledger",
-            params={
-                "user_id": f"eq.{paths.current_user_id()}",
-                "select": "date,code,shares_end,estimated_nav_close,official_nav,settle_status",
-                "order": "date.asc,code.asc",
-            },
+            params=params,
         )
-        return [x for x in rows if isinstance(x, dict)]
+        items = [x for x in rows if isinstance(x, dict)]
+        _cache_rows(cache_key, items)
+        return items
     except Exception:
         return []
 
@@ -51,7 +114,7 @@ def fund_gap_rows(code: str, days_back: int = 60) -> List[GapRow]:
         return []
 
     cutoff = (now_cn().date() - timedelta(days=int(days_back))).isoformat()
-    items = _read_daily_ledger_items()
+    items = _read_daily_ledger_items(start_date=cutoff, code=code)
     rows: List[GapRow] = []
     for it in items:
         if str(it.get("code", "")).strip() != code:
@@ -81,7 +144,7 @@ def fund_gap_rows(code: str, days_back: int = 60) -> List[GapRow]:
     return rows
 
 
-def fund_gap_summary(code: str, days_back: int = 60) -> Dict[str, Any]:
+def fund_gap_summary(code: str, days_back: int = 60, hit_threshold_pct: float = 0.30) -> Dict[str, Any]:
     rows = fund_gap_rows(code, days_back=days_back)
     if not rows:
         return {"count": 0, "mae_pct": None, "max_abs_gap_pct": None, "hit_rate_pct": None, "latest": None}
@@ -92,7 +155,9 @@ def fund_gap_summary(code: str, days_back: int = 60) -> Dict[str, Any]:
         "count": len(rows),
         "mae_pct": sum(abs_list) / len(abs_list),
         "max_abs_gap_pct": max(abs_list),
-        "hit_rate_pct": (sum(1 for v in abs_list if v <= 0.30) / len(abs_list) * 100.0),
+        "hit_rate_pct": (
+            sum(1 for v in abs_list if v <= float(hit_threshold_pct)) / len(abs_list) * 100.0
+        ),
         "latest": {
             "date": latest.date,
             "estimated_nav_close": latest.estimated_nav_close,
@@ -126,7 +191,7 @@ def guess_gap_reasons(code: str, latest_abs_gap_pct: float) -> List[str]:
 
 def _portfolio_gap_rows(days_back: int = 60) -> List[Dict[str, Any]]:
     cutoff = (now_cn().date() - timedelta(days=int(days_back))).isoformat()
-    items = _read_daily_ledger_items()
+    items = _read_daily_ledger_items(start_date=cutoff)
     by_date: Dict[str, List[dict]] = {}
     for it in items:
         d = str(it.get("date", "")).strip()
@@ -159,7 +224,7 @@ def _portfolio_gap_rows(days_back: int = 60) -> List[Dict[str, Any]]:
     return rows
 
 
-def portfolio_gap_summary(days_back: int = 60) -> Dict[str, Any]:
+def portfolio_gap_summary(days_back: int = 60, hit_threshold_pct: float = 0.30) -> Dict[str, Any]:
     rows = _portfolio_gap_rows(days_back=days_back)
     if not rows:
         return {"count": 0, "mae_pct": None, "max_abs_gap_pct": None, "hit_rate_pct": None, "latest": None}
@@ -168,7 +233,9 @@ def portfolio_gap_summary(days_back: int = 60) -> Dict[str, Any]:
         "count": len(rows),
         "mae_pct": sum(abs_list) / len(abs_list),
         "max_abs_gap_pct": max(abs_list),
-        "hit_rate_pct": (sum(1 for v in abs_list if v <= 0.30) / len(abs_list) * 100.0),
+        "hit_rate_pct": (
+            sum(1 for v in abs_list if v <= float(hit_threshold_pct)) / len(abs_list) * 100.0
+        ),
         "latest": rows[-1],
     }
 

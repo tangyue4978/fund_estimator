@@ -62,3 +62,10 @@ AUTH_QUERY_LOGIN_ENABLED = False
 # Persist web login by storing a session id in browser cookie, not in URL.
 AUTH_PERSIST_LOGIN_ENABLED = True
 AUTH_SESSION_DAYS = 14
+
+# Login abuse protection. The limiter stores only keyed digests in process
+# memory, is bounded, and never retains a submitted phone number.
+AUTH_LOGIN_MAX_FAILURES = 5
+AUTH_LOGIN_FAILURE_WINDOW_SEC = 5 * 60
+AUTH_LOGIN_LOCKOUT_SEC = 5 * 60
+AUTH_LOGIN_LIMITER_MAX_ENTRIES = 10_000

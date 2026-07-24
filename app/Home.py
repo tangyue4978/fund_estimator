@@ -3,18 +3,30 @@ import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+APP_DIR = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from storage import paths
 from services.auth_guard import require_login
-from config import settings
+from config import constants, settings
 
 paths.ensure_dirs()
 
 import streamlit as st
 import pandas as pd
 
+from app.ui import (
+    apply_app_style,
+    configure_page,
+    danger_container,
+    dataframe_height,
+    degraded_notice,
+    empty_state,
+    estimate_method_label,
+    page_header,
+    section_header,
+)
 from services.cloud_status_service import get_cloud_error
 from services.estimation_service import estimate_many
 from services.fund_service import get_fund_profile
@@ -27,7 +39,8 @@ except Exception:  # pragma: no cover
     watchlist_add_result = None
 
 
-st.set_page_config(page_title="Fund Estimator", layout="wide")
+configure_page("自选与估值", icon="📊")
+apply_app_style()
 require_login()
 
 
@@ -99,21 +112,39 @@ def _build_watchlist_rows(codes: list[str]) -> tuple[list[dict], dict]:
 
 
 WATCHLIST_COLUMNS = ["code", "name", "est_nav", "pct", "time", "method", "conf", "warn"]
+WATCHLIST_COLUMN_CONFIG = {
+    "code": "基金代码",
+    "name": "基金名称",
+    "est_nav": st.column_config.NumberColumn("估算净值", format="%.6f"),
+    "pct": "估算涨跌",
+    "time": "估值时间",
+    "method": "估值方式",
+    "conf": st.column_config.NumberColumn("置信度", format="%.2f"),
+    "warn": "提示",
+}
 
 
 def _render_watchlist_live(codes: list[str], sort_by: str = "默认", warn_only: bool = False) -> dict:
     rows, est_map = _build_watchlist_rows(codes)
-    valid_estimates = [est for est in est_map.values() if est]
-    if valid_estimates:
-        avg_pct = sum(float(est.est_change_pct or 0.0) for est in valid_estimates) / len(valid_estimates)
-        up_count = sum(1 for est in valid_estimates if float(est.est_change_pct or 0.0) > 0)
-        down_count = sum(1 for est in valid_estimates if float(est.est_change_pct or 0.0) < 0)
-        warn_count = sum(1 for est in valid_estimates if str(est.warning or "").strip())
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("自选数量", len(codes))
-        m2.metric("平均涨跌幅", f"{avg_pct:.2f}%")
-        m3.metric("上涨/下跌", f"{up_count}/{down_count}")
-        m4.metric("提示数", warn_count)
+    realtime_estimates = [
+        est
+        for est in est_map.values()
+        if est
+        and float(est.est_nav or 0.0) > 0
+        and est.method != constants.METHOD_FROZEN_NAV
+    ]
+    avg_pct = (
+        sum(float(est.est_change_pct or 0.0) for est in realtime_estimates) / len(realtime_estimates)
+        if realtime_estimates
+        else None
+    )
+    up_count = sum(1 for est in realtime_estimates if float(est.est_change_pct or 0.0) > 0)
+    down_count = sum(1 for est in realtime_estimates if float(est.est_change_pct or 0.0) < 0)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("自选数量", len(codes))
+    m2.metric("实时覆盖", f"{len(realtime_estimates)}/{len(codes)}")
+    m3.metric("平均涨跌幅", f"{avg_pct:.2f}%" if avg_pct is not None else "暂无")
+    m4.metric("上涨/下跌", f"{up_count}/{down_count}" if realtime_estimates else "暂无")
 
     def _row_pct(row: dict) -> float:
         try:
@@ -132,12 +163,12 @@ def _render_watchlist_live(codes: list[str], sort_by: str = "默认", warn_only:
     if sort_by == "涨跌幅":
         rows = sorted(rows, key=_row_pct, reverse=True)
     elif sort_by == "置信度":
-        rows = sorted(rows, key=_row_conf)
+        rows = sorted(rows, key=_row_conf, reverse=True)
 
-    st.caption(f"更新时间：{now_cn().isoformat(timespec='seconds')}（仅展示线上估值）")
-    row_height = 35
-    header_height = 38
-    table_height = header_height + max(1, len(rows)) * row_height
+    st.caption(f"更新时间：{now_cn().strftime('%Y-%m-%d %H:%M:%S')} · 仅展示线上估值")
+    for row in rows:
+        row["method"] = estimate_method_label(row.get("method"))
+    table_height = dataframe_height(len(rows), min_rows=2, max_rows=12)
     if rows:
         def _color_pct(row: dict) -> list[str]:
             pct = _row_pct(row)
@@ -149,24 +180,50 @@ def _render_watchlist_live(codes: list[str], sort_by: str = "默认", warn_only:
             width="stretch",
             hide_index=True,
             height=table_height,
+            column_config=WATCHLIST_COLUMN_CONFIG,
         )
     else:
-        st.dataframe(pd.DataFrame(rows, columns=WATCHLIST_COLUMNS), width="stretch", hide_index=True, height=table_height)
+        empty_state(
+            "没有符合当前筛选条件的基金",
+            "关闭“只看有提示的基金”或调整排序条件后再试。",
+        )
     return est_map
 
 
 def render_watchlist() -> None:
-    st.title("自选基金 - 实时估值")
-    st.sidebar.caption("列表估值数据会按交易时段自动局部刷新。")
+    page_header(
+        "自选与估值",
+        "集中查看关注基金的盘中估值、数据覆盖和风险提示。",
+        eyebrow="基金估值工作台",
+    )
+    st.sidebar.caption("交易时段内会自动刷新列表估值。")
+    codes = watchlist_list()
     watchlist_err = get_cloud_error("watchlist")
     if watchlist_err:
-        st.warning(f"自选列表读取失败，当前显示最近一次成功读取的数据：{watchlist_err}")
+        degraded_notice(
+            "云端自选列表暂时不可用，当前可能显示最近一次成功读取的数据。",
+            watchlist_err,
+            detail_label="自选列表技术详情",
+        )
 
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
-        code = st.text_input("新增基金代码", value="", placeholder="例如：510300 / 000001")
+        code = st.text_input(
+            "新增基金代码",
+            value="",
+            placeholder="例如：510300 或 000001",
+            help="请输入 6 位基金代码。",
+        )
+        code_is_valid = not code.strip() or (code.strip().isdigit() and len(code.strip()) == 6)
+        if code.strip() and not code_is_valid:
+            st.error("基金代码应为 6 位数字。")
     with col2:
-        if st.button("添加", width="stretch") and code.strip():
+        if st.button(
+            "添加到自选",
+            type="primary",
+            width="stretch",
+            disabled=not code.strip() or not code_is_valid,
+        ):
             if callable(watchlist_add_result):
                 res = watchlist_add_result(code.strip())
                 if bool(res.get("ok")):
@@ -179,16 +236,23 @@ def render_watchlist() -> None:
             _clear_home_est_cache()
             st.rerun()
     with col3:
-        if st.button("刷新估值", width="stretch"):
+        if st.button(
+            "刷新估值",
+            width="stretch",
+            help="立即重新获取当前自选基金估值。",
+            disabled=not codes,
+        ):
             _clear_home_est_cache()
             st.rerun()
 
-    codes = watchlist_list()
     if not codes:
-        st.info("自选为空：输入代码后点击添加。")
+        empty_state(
+            "自选列表还是空的",
+            "在上方输入 6 位基金代码并添加，即可开始查看盘中估值。",
+        )
         return
 
-    sort_by = st.radio("列表排序", ["默认", "涨跌幅", "置信度"], horizontal=True)
+    sort_by = st.radio("排序方式", ["默认顺序", "涨跌幅", "置信度"], horizontal=True)
     warn_only = st.toggle("只看有提示的基金", value=False)
     refresh_sec = _home_refresh_sec()
     use_fragment_refresh = _home_fragment_refresh_enabled()
@@ -224,23 +288,62 @@ def render_watchlist() -> None:
         return f"{code_item} - {name_map.get(code_item, '')}"
 
     st.divider()
-    st.subheader("查看基金详情")
+    section_header("查看基金详情", "选择一只基金，查看走势、估值误差和日结覆盖状态。")
     selected = st.selectbox("选择一个基金打开详情页", options=codes, format_func=_fmt_code)
-    if st.button("打开详情页", width="stretch"):
+    if st.button("查看所选基金详情", type="primary", width="stretch"):
         st.query_params["code"] = selected
-        st.switch_page("pages/03_基金详情.py")
+        st.switch_page(DETAIL_PAGE)
 
     st.divider()
-    st.subheader("管理自选")
-    rm_code = st.selectbox("选择要移除的代码", options=codes, key="rm_code", format_func=_fmt_code)
-    if st.button("移除所选", type="secondary", width="stretch"):
-        res = watchlist_remove(rm_code)
-        if bool(res.get("ok", True)):
-            st.toast("已移除", icon="🗑️")
-            _clear_home_est_cache()
-            st.rerun()
-        else:
-            st.toast(str(res.get("message", "移除失败")), icon="❌")
+    with st.expander("管理自选列表", expanded=False):
+        rm_code = st.selectbox("要移除的基金", options=codes, key="rm_code", format_func=_fmt_code)
+        with danger_container("remove_watchlist"):
+            st.caption("此操作只会移出自选列表，不会删除持仓或日结记录。")
+            if st.button("从自选中移除", type="primary", width="stretch"):
+                res = watchlist_remove(rm_code)
+                if bool(res.get("ok", True)):
+                    st.toast("已从自选中移除", icon="🗑️")
+                    _clear_home_est_cache()
+                    st.rerun()
+                else:
+                    st.toast(str(res.get("message", "移除失败")), icon="❌")
 
 
-render_watchlist()
+WATCHLIST_PAGE = st.Page(render_watchlist, title="自选与估值", icon=":material/home:", default=True)
+PORTFOLIO_PAGE = st.Page(
+    str(APP_DIR / "pages" / "01_持仓.py"),
+    title="持仓管理",
+    icon=":material/account_balance_wallet:",
+)
+LEDGER_PAGE = st.Page(
+    str(APP_DIR / "pages" / "02_日结.py"),
+    title="日结台账",
+    icon=":material/receipt_long:",
+)
+DETAIL_PAGE = st.Page(
+    str(APP_DIR / "pages" / "03_基金详情.py"),
+    title="基金详情",
+    icon=":material/finance:",
+)
+ANALYSIS_PAGE = st.Page(
+    str(APP_DIR / "pages" / "04_组合分析.py"),
+    title="组合分析",
+    icon=":material/analytics:",
+)
+SYSTEM_STATUS_PAGE = st.Page(
+    str(APP_DIR / "pages" / "05_系统状态.py"),
+    title="系统状态",
+    icon=":material/health_and_safety:",
+)
+
+navigation = st.navigation(
+    [
+        WATCHLIST_PAGE,
+        PORTFOLIO_PAGE,
+        LEDGER_PAGE,
+        DETAIL_PAGE,
+        ANALYSIS_PAGE,
+        SYSTEM_STATUS_PAGE,
+    ]
+)
+navigation.run()

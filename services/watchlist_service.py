@@ -11,6 +11,9 @@ from services.fund_service import get_fund_profile
 from storage import paths
 
 
+MAX_WATCHLIST_ITEMS = 50
+
+
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -26,9 +29,7 @@ def _normalize_code(code: str) -> str:
 
 
 def _is_valid_code(code: str) -> bool:
-    if not code:
-        return False
-    return bool(re.fullmatch(r"[A-Z0-9._-]{3,20}", code))
+    return bool(re.fullmatch(r"\d{6}", code or ""))
 
 
 def _normalize_items(items: list[Any]) -> List[str]:
@@ -120,41 +121,45 @@ def watchlist_add_result(code: str) -> Dict[str, Any]:
         return {
             "ok": False,
             "code": code_n,
-            "items": watchlist_list(),
-            "message": "代码格式无效（仅支持 3-20 位字母、数字、点、下划线或短横线）",
+            "items": _read_cached_items(),
+            "message": "基金代码格式无效（请输入 6 位数字）",
             "cloud_synced": False,
         }
 
     try:
         uid = _current_user_id()
-        exists = supabase_client.get_rows(
-            "app_watchlist",
-            params={
-                "user_id": f"eq.{uid}",
-                "code": f"eq.{code_n}",
-                "select": "id",
-                "limit": "1",
-            },
-        )
-        if not exists:
+        items = _load_remote_items()
+        clear_cloud_error("watchlist")
+        if code_n not in items:
+            if len(items) >= MAX_WATCHLIST_ITEMS:
+                return {
+                    "ok": False,
+                    "code": code_n,
+                    "items": items,
+                    "message": f"自选基金最多 {MAX_WATCHLIST_ITEMS} 只，请先移除不需要的基金",
+                    "cloud_synced": False,
+                }
             resp = supabase_client.insert_row("app_watchlist", {"user_id": uid, "code": code_n})
             if resp.status_code not in (200, 201, 409):
                 raise RuntimeError(f"watchlist add failed({resp.status_code})")
-        _clear_cached_items()
+            items.append(code_n)
+        items = _normalize_items(items)
+        _write_cached_items(items)
+        clear_cloud_error("watchlist")
     except Exception as e:
         set_cloud_error("watchlist", e)
         return {
             "ok": False,
             "code": code_n,
-            "items": watchlist_list(),
-            "message": f"云端同步失败，请稍后重试：{e}",
+            "items": _read_cached_items(),
+            "message": "云端同步失败，请稍后重试。",
             "cloud_synced": False,
         }
 
     return {
         "ok": True,
         "code": code_n,
-        "items": watchlist_list(),
+        "items": items,
         "message": "已添加",
         "cloud_synced": True,
     }
@@ -179,6 +184,9 @@ def watchlist_remove(code: str) -> dict:
 
     try:
         uid = _current_user_id()
+        items = _read_cached_items()
+        if not items:
+            items = _load_remote_items()
         resp = supabase_client.delete_rows(
             "app_watchlist",
             params={
@@ -188,15 +196,17 @@ def watchlist_remove(code: str) -> dict:
         )
         if resp.status_code not in (200, 204):
             raise RuntimeError(f"watchlist remove failed({resp.status_code})")
-        _clear_cached_items()
-        return {"ok": True, "items": watchlist_list(), "updated_at": _now_iso()}
+        items = [item for item in items if item != code_n]
+        _write_cached_items(items)
+        clear_cloud_error("watchlist")
+        return {"ok": True, "items": items, "updated_at": _now_iso()}
     except Exception as e:
         set_cloud_error("watchlist", e)
         return {
             "ok": False,
-            "items": watchlist_list(),
+            "items": _read_cached_items(),
             "updated_at": _now_iso(),
-            "message": f"云端移除失败，请稍后重试：{e}",
+            "message": "云端移除失败，请稍后重试。",
         }
 
 

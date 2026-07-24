@@ -19,6 +19,7 @@ class GszQuote:
     gszzl: float
     gztime: str
     nav: Optional[float] = None  # dwjz
+    stale: bool = False
 
 
 _JSONPGZ_RE = re.compile(r"jsonpgz\((\{.*\})\)\s*;?\s*$", re.S)
@@ -40,6 +41,7 @@ def _fetch_gsz_one_real(code: str) -> Optional[GszQuote]:
         url=url,
         params=params,
         headers=_headers(),
+        text_validator=lambda text: bool(_JSONPGZ_RE.search(text.strip())),
     )
     if not resp.ok or not resp.text:
         return None
@@ -73,7 +75,15 @@ def _fetch_gsz_one_real(code: str) -> Optional[GszQuote]:
         except Exception:
             nav = None
 
-    return GszQuote(code=code, name=name, gsz=gsz, gszzl=gszzl, gztime=gztime_iso, nav=nav)
+    return GszQuote(
+        code=code,
+        name=name,
+        gsz=gsz,
+        gszzl=gszzl,
+        gztime=gztime_iso,
+        nav=nav,
+        stale=bool(resp.stale),
+    )
 
 
 def _fetch_gsz_quotes_mock(codes: List[str]) -> Dict[str, GszQuote]:
